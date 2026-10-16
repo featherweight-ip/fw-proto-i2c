@@ -10,7 +10,9 @@
 // behind the target API, checking true round-trip data integrity (a read
 // returns a previously written value), clock stretching (the memory model
 // adds simulated latency before answering, forcing the target core to hold
-// SCL low), and both ACK and NACK paths.
+// SCL low), both ACK and NACK paths, and repeated START (Sr) after a write,
+// after a read and after a NACKed address. The monitor must see every
+// START, Sr, STOP and byte the driver put on the bus.
 //
 // The controller's timing parameters are this module's, so a wrapper top
 // can rerun the same case at another bus speed (i2c_proto_fast_tb.sv: 1
@@ -39,21 +41,32 @@ module i2c_proto_tb #(
         i2c_controller_if ctl;
         int unsigned errors;
         int unsigned n_bytes;
+        int unsigned n_addr;   // address phases (START + Sr)
+        int unsigned n_sr;     // of which repeated STARTs
+        int unsigned n_stop;
 
         function new(i2c_controller_if ctl);
             this.ctl = ctl;
         endfunction
 
-        task automatic write_bytes(input bit [6:0] addr, input bit [7:0] data[]);
+        // start() and stop(), counted so the monitor's stream can be
+        // checked against what the driver actually put on the bus.
+        task automatic do_start(input bit [6:0] addr, input bit read,
+                                input bit repeated, output bit ack,
+                                output bit arb_lost);
+            ctl.start(addr, 1'b0, read, repeated, ack, arb_lost);
+            n_addr++;
+            if (repeated) n_sr++;
+        endtask
+
+        task automatic do_stop();
+            ctl.stop();
+            n_stop++;
+        endtask
+
+        // The data bytes of a write, after its address phase.
+        task automatic tx_bytes(input bit [7:0] data[]);
             bit ack, arb_lost;
-            ctl.start(addr, 1'b0, 1'b0, 1'b0, ack, arb_lost);
-            if (arb_lost || !ack) begin
-                $display("FAIL: write addr 0x%02h not ACKed (arb_lost=%0d ack=%0d)",
-                          addr, arb_lost, ack);
-                errors++;
-                ctl.stop();
-                return;
-            end
             foreach (data[i]) begin
                 ctl.tx_byte(data[i], ack, arb_lost);
                 n_bytes++;
@@ -63,20 +76,13 @@ module i2c_proto_tb #(
                     errors++;
                 end
             end
-            ctl.stop();
         endtask
 
-        task automatic read_bytes(input bit [6:0] addr, input int n, output bit [7:0] data[]);
-            bit ack, arb_lost;
+        // The data bytes of a read, after its address phase. NACKs the
+        // last, which hands SDA back for a STOP or Sr.
+        task automatic rx_bytes(input int n, output bit [7:0] data[]);
+            bit arb_lost;
             data = new[n];
-            ctl.start(addr, 1'b0, 1'b1, 1'b0, ack, arb_lost);
-            if (arb_lost || !ack) begin
-                $display("FAIL: read addr 0x%02h not ACKed (arb_lost=%0d ack=%0d)",
-                          addr, arb_lost, ack);
-                errors++;
-                ctl.stop();
-                return;
-            end
             for (int i = 0; i < n; i++) begin
                 bit [7:0] b;
                 ctl.rx_byte(i < n-1, b, arb_lost);
@@ -87,7 +93,50 @@ module i2c_proto_tb #(
                     errors++;
                 end
             end
-            ctl.stop();
+        endtask
+
+        task automatic check_bytes(input string what, input bit [7:0] got[],
+                                   input bit [7:0] exp[]);
+            if (got.size() != exp.size()) begin
+                $display("FAIL: %s: got %0d bytes, exp %0d", what, got.size(), exp.size());
+                errors++;
+                return;
+            end
+            foreach (exp[i]) begin
+                if (got[i] !== exp[i]) begin
+                    $display("FAIL: %s[%0d] got 0x%02h exp 0x%02h", what, i, got[i], exp[i]);
+                    errors++;
+                end
+            end
+        endtask
+
+        // An address phase the target must ACK.
+        task automatic expect_ack(input bit [6:0] addr, input bit read,
+                                  input bit repeated, output bit ok);
+            bit ack, arb_lost;
+            do_start(addr, read, repeated, ack, arb_lost);
+            ok = ack && !arb_lost;
+            if (!ok) begin
+                $display("FAIL: %s %s addr 0x%02h not ACKed (arb_lost=%0d ack=%0d)",
+                          repeated ? "Sr" : "START", read ? "read" : "write",
+                          addr, arb_lost, ack);
+                errors++;
+            end
+        endtask
+
+        task automatic write_bytes(input bit [6:0] addr, input bit [7:0] data[]);
+            bit ok;
+            expect_ack(addr, 1'b0, 1'b0, ok);
+            if (ok) tx_bytes(data);
+            do_stop();
+        endtask
+
+        task automatic read_bytes(input bit [6:0] addr, input int n, output bit [7:0] data[]);
+            bit ok;
+            data = new[n];
+            expect_ack(addr, 1'b1, 1'b0, ok);
+            if (ok) rx_bytes(n, data);
+            do_stop();
         endtask
 
         task run();
@@ -145,14 +194,65 @@ module i2c_proto_tb #(
             // NACK path end to end).
             begin
                 bit ack, arb_lost;
-                ctl.start(7'h7F, 1'b0, 1'b0, 1'b0, ack, arb_lost);
+                do_start(7'h7F, 1'b0, 1'b0, ack, arb_lost);
                 if (ack || arb_lost) begin
                     $display("FAIL: expected address 0x7F to be NACKed");
                     errors++;
                 end else
                     $display("[driver] address 0x7F correctly NACKed");
-                ctl.stop();
+                do_stop();
             end
+            #200ns;
+
+            run_repeated_start();
+        endtask
+
+        // Repeated START (Sr): the controller keeps the bus between
+        // segments. mem_model resets its pointer on every address phase,
+        // Sr included, so each read below returns from offset 0.
+        task automatic run_repeated_start();
+            bit [7:0] wr[];
+            bit [7:0] rd[];
+            bit ok, ack, arb_lost;
+
+            // write -> Sr -> read: the usual register read. The target
+            // ACKed the last write byte, so it is mid-write when the Sr
+            // arrives.
+            wr = '{8'hC0, 8'h41, 8'hC2};
+            expect_ack(TGT_ADDR, 1'b0, 1'b0, ok);
+            tx_bytes(wr);
+            expect_ack(TGT_ADDR, 1'b1, 1'b1, ok);
+            rx_bytes(3, rd);
+            do_stop();
+            check_bytes("write-Sr-read", rd, wr);
+            #200ns;
+
+            // read -> Sr -> write -> Sr -> read: Sr after a NACKed read
+            // byte, and Sr after a write whose last byte has MSB 0 (the
+            // controller presents no SDA drive across that ack).
+            expect_ack(TGT_ADDR, 1'b1, 1'b0, ok);
+            rx_bytes(2, rd);
+            check_bytes("read-Sr", rd, '{8'hC0, 8'h41});
+            wr = '{8'h3D, 8'h1E};
+            expect_ack(TGT_ADDR, 1'b0, 1'b1, ok);
+            tx_bytes(wr);
+            expect_ack(TGT_ADDR, 1'b1, 1'b1, ok);
+            rx_bytes(3, rd);
+            do_stop();
+            check_bytes("Sr-write-Sr-read", rd, '{8'h3D, 8'h1E, 8'hC2});
+            #200ns;
+
+            // NACKed address -> Sr -> read: the target is not selected
+            // when the Sr arrives.
+            do_start(7'h7F, 1'b0, 1'b0, ack, arb_lost);
+            if (ack || arb_lost) begin
+                $display("FAIL: expected address 0x7F to be NACKed (before Sr)");
+                errors++;
+            end
+            expect_ack(TGT_ADDR, 1'b1, 1'b1, ok);
+            rx_bytes(1, rd);
+            do_stop();
+            check_bytes("NACK-Sr-read", rd, '{8'h3D});
         endtask
     endclass
 
@@ -209,10 +309,13 @@ module i2c_proto_tb #(
     class observer implements i2c_monitor_if;
         int unsigned n_bytes_seen;
         int unsigned n_starts;
+        int unsigned n_sr;
         int unsigned n_stops;
+        int unsigned n_addr_bytes;
 
         virtual function void observe_start(input bit repeated);
             n_starts++;
+            if (repeated) n_sr++;
         endfunction
         virtual function void observe_stop();
             n_stops++;
@@ -220,6 +323,7 @@ module i2c_proto_tb #(
         virtual function void observe_byte(input bit addr_phase, input bit [7:0] data,
                                             input bit ack);
             n_bytes_seen++;
+            if (addr_phase) n_addr_bytes++;
         endfunction
         virtual function void observe_arb_lost();
         endfunction
@@ -288,19 +392,29 @@ module i2c_proto_tb #(
         repeat (50) @(posedge clock);
 
         errors = drv.errors;
-        // The monitor sees one address byte per start() -- 3 reads, 2
-        // writes and the NACKed write = 6 -- plus every data byte the
-        // driver moved, and one STOP per transaction.
-        if (obs.n_bytes_seen != (6 + drv.n_bytes)) begin
+        // The monitor sees one address byte per start() (START or Sr),
+        // every data byte the driver moved, one STOP per stop(), and
+        // flags exactly the driver's Sr calls as repeated.
+        if (obs.n_bytes_seen != (drv.n_addr + drv.n_bytes)) begin
             $display("FAIL: monitor saw %0d bytes, expected %0d",
-                      obs.n_bytes_seen, 6 + drv.n_bytes);
+                      obs.n_bytes_seen, drv.n_addr + drv.n_bytes);
             errors++;
         end else
             $display("[monitor] observed %0d bytes (%0d address + %0d data) OK",
-                      obs.n_bytes_seen, 6, drv.n_bytes);
+                      obs.n_bytes_seen, drv.n_addr, drv.n_bytes);
 
-        if (obs.n_stops != 6) begin
-            $display("FAIL: monitor saw %0d STOPs, expected 6", obs.n_stops);
+        if (obs.n_addr_bytes != drv.n_addr) begin
+            $display("FAIL: monitor saw %0d address bytes, expected %0d",
+                      obs.n_addr_bytes, drv.n_addr);
+            errors++;
+        end
+        if (obs.n_starts != drv.n_addr || obs.n_sr != drv.n_sr) begin
+            $display("FAIL: monitor saw %0d STARTs (%0d Sr), expected %0d (%0d Sr)",
+                      obs.n_starts, obs.n_sr, drv.n_addr, drv.n_sr);
+            errors++;
+        end
+        if (obs.n_stops != drv.n_stop) begin
+            $display("FAIL: monitor saw %0d STOPs, expected %0d", obs.n_stops, drv.n_stop);
             errors++;
         end
 

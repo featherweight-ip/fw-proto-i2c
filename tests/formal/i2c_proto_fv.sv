@@ -185,37 +185,14 @@ module i2c_proto_fv (
         end
     end
 
-    // NOTE: a companion "the controller's bit index is always one of the
-    // 9 legal positions (0..8)" range check (`u_ctl.bit_idx <= 4'd8`) was
-    // attempted here and dropped: BMC reported a violation within ~9
-    // steps, far fewer than the cycles the RTL needs to legitimately
-    // reach bit_idx==8 (even bit_idx==1 needs ~T_LOW+T_HIGH+2 ~= 10+
-    // cycles at the module's default timing parameters). That gap, plus
-    // VCD inspection showing extra same-width "anyinit" (free-initial-
-    // value) registers not obviously corresponding to any un-reset signal
-    // in this core, points at a toolchain/hierarchical-reference quirk
-    // (sv2v conversion + yosys's handling of a hierarchical reg reference
-    // from the harness into a submodule) rather than a real RTL defect --
-    // not root-caused under time pressure. Flagged in the kit
-    // implementation report as a follow-up rather than shipped as a
-    // checker that cannot be trusted.
-
-    // ---- #3 ACK timing: sampled on the 9th clock, not before --------
-    // u_ctl.ack_result (the START/TX_BYTE ack sample) is written from
-    // exactly one place in the RTL, gated on bit_idx==8 (verified by
-    // inspection: a single `if (bit_idx == 8 && !ack_is_tx)` in
-    // i2c_controller_xtor_core.sv's BIT_WAIT_HI branch). Combined with the
-    // bit_idx range assertion above (never exceeds 8, so bit_idx==8 is the
-    // unique, final position of the 9-bit exchange), that write site being
-    // singular is what makes "ack sampled on the 9th clock" true -- not
-    // independently re-asserted here as a $past-based "did ack_result
-    // change" check, which a BMC run flagged within 3 steps (far fewer
-    // than the ~80 cycles the RTL needs to ever reach bit_idx==8) in a way
-    // that pointed at a $past/hierarchical-register interaction in this
-    // toolchain rather than a real RTL bug. Not root-caused under time
-    // pressure; flagged in the kit implementation report as a follow-up
-    // rather than papered over with a check that doesn't actually test
-    // the property.
+    // ---- #2/#3 (not checked) -----------------------------------------
+    // A "bit index stays in 0..8" check and an "ACK sampled on the 9th
+    // clock" check were tried here and failed within a few steps. Both
+    // read u_ctl.* hierarchical references, which this flow turns into
+    // undriven constants (see #5 and PROPERTIES.md "Harness pitfalls").
+    // They need a port-level form before they can be retried. Until then
+    // "ACK on the 9th clock" rests on the single `bit_idx == 8` write site
+    // of ack_result in i2c_controller_xtor_core.sv, by inspection.
 
     // ---- #4 clock-low-wins synchronization --------------------------
     // Whenever EITHER core still holds its own line low (scl_oe), the bus
@@ -230,23 +207,21 @@ module i2c_proto_fv (
         end
     end
 
-    // ---- #5 arbitration-loss correctness -----------------------------
-    // The controller only ever enters ARB_ABORT (reports arb_lost) after
-    // a cycle where it was driving a bit it intended to release (1) and
-    // sensed the bus pulled low by someone else -- never spuriously.
-    localparam ARB_ABORT_ST = 4'd12; // see i2c_controller_xtor_core.sv enum order
-    reg arb_cause_seen;
-    always @(posedge clock) begin
-        if (reset) arb_cause_seen <= 1'b0;
-        else if (u_ctl.state == 4'd6 /* BIT_WAIT_HI */ && scl &&
-                 u_ctl.driving_now && u_ctl.intended_bit && !sda)
-            arb_cause_seen <= 1'b1;
-        else if (u_ctl.state == 4'd0 /* IDLE */)
-            arb_cause_seen <= 1'b0;
-    end
+    // ---- #5 no arbitration loss without a second controller ---------
+    // UM10204 arbitration is lost only to another controller driving 0
+    // while this one drives 1. This harness has one controller, so every
+    // arb_lost=1 would mean the TARGET pulled SDA low over a bit the
+    // controller was driving: out of turn, e.g. one bit misaligned. Real
+    // arbitration is exercised by the i2c_arb sim.
+    //
+    // (This used to assert ARB_ABORT => an arbitration cause, read through
+    // u_ctl.* hierarchical references. The sv2v + yosys flow does not
+    // resolve those: yosys declares each as an implicit, undriven wire, so
+    // the check was a constant. Checks here use ports and harness state
+    // only -- PROPERTIES.md "Harness pitfalls".)
     always @(posedge clock) begin
         if (f_past_valid && !$past(reset)) begin
-            if (u_ctl.state == ARB_ABORT_ST) assert ($past(arb_cause_seen) || arb_cause_seen);
+            if (ctl_rsp_rise) assert (!ctl_rsp_dat[8] /* arb_lost */);
         end
     end
 
@@ -264,13 +239,13 @@ module i2c_proto_fv (
             last_tx_valid <= 1'b0;
             lost_since    <= 1'b0;
         end else begin
-            if (u_ctl.state == 4'd0 /* IDLE */ && f_req_valid && ctl_req_ready &&
+            if (f_req_valid && ctl_req_ready &&
                 f_req_dat[23:22] == 2'd1 /* I2C_OP_TX_BYTE */) begin
                 last_tx_byte  <= f_req_dat[8:1]; // wr_data field, see i2c_xtor_macros.svh
                 last_tx_valid <= 1'b1;
                 lost_since    <= 1'b0;
             end
-            if (u_ctl.state == 4'd12 /* ARB_ABORT */) lost_since <= 1'b1;
+            if (ctl_rsp_rise && ctl_rsp_dat[8] /* arb_lost */) lost_since <= 1'b1;
             if (tgt_req_valid && f_tgt_req_ready && tgt_req_dat[20:19] == 2'd1 /* RX_BYTE */) begin
                 if (last_tx_valid && !lost_since)
                     assert (tgt_req_dat[7:0] == last_tx_byte);
@@ -309,8 +284,70 @@ module i2c_proto_fv (
         end
     end
 
+    // ---- #8 START/STOP edges are the controller's own ----------------
+    // Every START (or Sr) edge on the bus falls while the controller is
+    // executing a start() op and is itself pulling SDA low, with the
+    // target not driving SDA; every STOP edge rises while it is executing
+    // a stop(). Catches a core making a spurious edge: the controller
+    // presenting a stale SDA drive between ops (both fixed bugs in
+    // PROPERTIES.md), or the target still holding its ACK, or driving a
+    // data bit, when SCL rises for an Sr. An op is in progress from its
+    // acceptance until the controller raises rsp_valid, which it does only
+    // after the edge (both edges at T_SU_STA = T_BUF = 1).
+    reg ctl_busy;
+    always @(posedge clock) begin
+        if (reset) ctl_busy <= 1'b0;
+        else if (f_req_valid && ctl_req_ready) ctl_busy <= 1'b1;
+        else if (ctl_rsp_valid) ctl_busy <= 1'b0;
+    end
+    always @(posedge clock) begin
+        if (f_past_valid && !$past(reset)) begin
+            if (start_edge)
+                assert (ctl_busy && ctl_op == 2'd0 /* START */ && ctl_sda_oe && !tgt_sda_oe);
+            if (stop_edge)
+                assert (ctl_busy && ctl_op == 2'd3 /* STOP */);
+        end
+    end
+
+    // ---- #9 address integrity, START and Sr ---------------------------
+    // Each address phase the target raises carries the address and R/W of
+    // the controller's last start() -- whether a START or an Sr opened it --
+    // and the target raises none the controller did not send. A request is
+    // new on the rise of req_valid (the core leaves UPREQ before raising
+    // the next).
+    reg [7:0] last_addr_byte;      // {addr[6:0], read}
+    reg       last_addr_valid;
+    wire      tgt_addressed = tgt_req_valid && !tgt_upreq_prev &&
+                              tgt_req_dat[20:19] == 2'd0 /* ADDRESSED */;
+    always @(posedge clock) begin
+        if (reset) last_addr_valid <= 1'b0;
+        else begin
+            if (f_req_valid && ctl_req_ready && f_req_dat[23:22] == 2'd0 /* START */) begin
+                // addr[6:0] and read fields, see i2c_xtor_macros.svh
+                last_addr_byte  <= {f_req_dat[18:12], f_req_dat[10]};
+                last_addr_valid <= 1'b1;
+            end
+            if (tgt_addressed) begin
+                assert (last_addr_valid);
+                if (last_addr_valid)
+                    assert ({tgt_req_dat[15:9], tgt_req_dat[8]} == last_addr_byte);
+                last_addr_valid <= 1'b0;
+            end
+        end
+    end
+
+    // An Sr has been seen on the bus: a START edge inside a transaction.
+    reg sr_seen;
+    always @(posedge clock) begin
+        if (reset) sr_seen <= 1'b0;
+        else if (start_edge && in_txn) sr_seen <= 1'b1;
+    end
+
     // ---- cover: the proof is not vacuous -----------------------------
     always @(posedge clock) begin
+        // An address phase opened by an Sr reaches the target (#8 and #9
+        // see a repeated START).
+        cover (f_past_valid && !reset && sr_seen && tgt_addressed);
         cover (tgt_req_valid && f_tgt_req_ready && tgt_req_dat[20:19] == 2'd1);
         // A target-supplied byte reaches the controller (#7 can fire).
         cover (!reset && rx_result && last_sup_valid);

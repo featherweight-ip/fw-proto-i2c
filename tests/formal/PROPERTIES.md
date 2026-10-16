@@ -47,9 +47,11 @@ environment breaking it, not because the cores mis-handled a legal caller.
 | 2 | ACK sampled on the 9th clock, not before | framing | **none.** Relies on the single `bit_idx == 8` write site of `ack_result` (by inspection). A `$past`-based check was dropped; see "Harness pitfalls". | gap |
 | 3 | The controller's bit index stays in 0..8 | FSM legality | **none.** A `u_ctl.bit_idx <= 8` check was dropped; see "Harness pitfalls". | gap |
 | 4 | Clock-low-wins: the bus never reads SCL high while either core holds it low | handshake | `assert (!$past(scl))` whenever either `*_scl_oe` was set | in BMC |
-| 5 | Arbitration loss only after driving 1 and sensing 0 | mutual exclusion | `ARB_ABORT ⇒ arb_cause_seen` | vacuous here (one controller); arbitration is exercised by the `i2c_arb` sim |
+| 5 | Arbitration is lost only to another controller | mutual exclusion | with one controller, no response ever has `arb_lost=1`: one would mean the target pulled SDA low over a bit the controller drove | in BMC; real arbitration is exercised by the `i2c_arb` sim |
 | 6 | Data integrity end to end, write: each `tx_byte()` arrives at the target intact | integrity | `tgt RX_BYTE data == last_tx_byte` | in BMC |
 | 7 | Data integrity end to end, read: each byte the target's model supplies reaches the controller's `rx_byte()` intact | integrity | `ctl RX_BYTE rd_data == last_sup_byte` | in BMC |
+| 8 | START, Sr and STOP edges are the controller's own | framing | a START edge only while a `start()` op is in progress, with the controller pulling SDA low and the target not; a STOP edge only while a `stop()` op is | in BMC |
+| 9 | Address integrity, START and Sr: each address phase the target raises carries the controller's last `start()` address and R/W | integrity | on each new `ADDRESSED` request: a `start()` is pending, and `{addr, read}` match it | in BMC |
 
 ## Cover goals (non-vacuity)
 
@@ -58,10 +60,11 @@ environment breaking it, not because the cores mis-handled a legal caller.
 | A data byte reaches the target's up-link (`RX_BYTE` request accepted) | step 63 |
 | A byte the target supplied reaches the controller (invariant 7 can fire) | step 68 |
 | A real STOP closes a transaction, out of reset | step 42 |
+| An address phase opened by an Sr reaches the target (invariants 8 and 9 see a repeated START) | step 66 |
 
 The BMC depth must be above 68, or invariant 7 can never fire (63 for
 invariant 6). The earlier depth of 40 "passed" for exactly that reason.
-BMC at depth 80 passes in about 14 minutes.
+BMC at depth 80 passes in about 12 minutes.
 
 ## Fixed — the controller could leave reset driving SDA low
 
@@ -84,10 +87,11 @@ ever ended a write with an MSB-1 byte. Fixed by clearing `payload_is_tx`
 and `ack_in_r` on STOP; `i2c_proto_tb` now ends a write with 0x3C, so its
 STOP count catches a regression.
 
-**Formal gap this exposes:** no invariant says "a START or STOP edge only
-happens while the controller is in a START or STOP state". Invariant 1
-accepts the spurious pair, since the STOP does close an (also spurious)
-transaction. Worth adding as invariant 8.
+**Formal gap this exposed:** no invariant said that a START or STOP edge
+only happens while the controller is making one. Invariant 1 accepts the
+spurious pair, since the STOP does close an (also spurious) transaction.
+Now invariant 8. Teeth check: with the fix taken back out, BMC fails
+invariant 8 at step 42.
 
 ## Fixed — the target lost bit 7 after an ACK when SCL low was 1 clock
 
@@ -129,7 +133,38 @@ Regressions:
 Adding invariant 7 also turned up a caller-contract gap, now assumption A5:
 the harness allowed a STOP or Sr straight after an ACKed read address.
 
+## Repeated START
+
+The target core's header used to list repeated START as a known gap: the
+controller drops SCL once before an Sr, the target takes that drop as the
+start of a data byte, and the note expected the target to mis-count. In
+practice the global START override already handles it. The Sr's SCL rise
+clocks in one bit, and the Sr edge then discards it and receives the new
+address. The note was written before the 1-clock fix made every
+`*_WAIT_FALL` start the next byte directly.
+
+What now covers Sr:
+
+- `i2c_proto_tb` (and `i2c_proto_fast_tb`, at 1-clock timing): write → Sr →
+  read, read → Sr → write → Sr → read, NACKed address → Sr → read, with
+  data checked and the monitor's START/Sr/STOP/byte counts matched to the
+  driver's.
+- Invariants 8 and 9, with the Sr cover goal showing the BMC reaches an
+  Sr address phase (step 66, inside depth 80). The free environment
+  already allowed `repeated=1`; until now nothing showed that it got there.
+
 ## Harness pitfalls
+
+**Hierarchical references do not work in this flow.** The harness used to
+read `u_ctl.state`, `u_ctl.driving_now` and `u_ctl.intended_bit`. sv2v
+passes them through, and yosys then declares each one as an implicit,
+undriven wire (`Identifier '\u_ctl.state' is implicitly declared`, then
+`setundef` makes it a constant). So the old invariant 5 never checked
+anything, and invariant 6's arbitration-loss reset never fired. The
+dropped checks for invariants 2 and 3 (below) used the same kind of
+reference, which explains their "failures within a few steps". Every check
+now uses the cores' ports and the harness's own registers. To check
+internal state, bring it out of the core through a port.
 
 The harness's own tracking registers (`sclq`, `sdaq`, `in_txn`, ...) reset
 *synchronously*, so during the reset step they hold free ("anyinit")
@@ -137,6 +172,5 @@ initial values. Any check or cover that looks at them with `$past` must be
 gated on `!$past(reset)`. An ungated `cover ($past(stop_edge))` was hit
 vacuously at step 2.
 
-This, or the controller's unreset registers (fixed above), may also explain
-why the dropped checks (invariants 2 and 3) "failed" within a few steps.
-Retry them with the reset gating before treating them as tool problems.
+The dropped checks (invariants 2 and 3) read `u_ctl.*`, so they need a
+port-level form before they can be retried.

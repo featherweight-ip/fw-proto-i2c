@@ -21,23 +21,21 @@
 // (address+R/W, write-data, read-data) -- see `recv_purpose`/`T_WATCH`'s
 // kind dispatch below, mirroring the controller core's single byte engine.
 //
-// Known limitations (flagged in the kit implementation report, not fixed
-// here):
-//  - No bus-level timeout/abort if a START is seen but the address never
-//    completes (e.g. controller disappears mid-byte) -- the core simply
-//    waits. Real hardware relies on a higher-level bus-timeout (SMBus
-//    T_TIMEOUT, design.md §8 issue 5, explicitly out of scope for v1).
-//  - Repeated-START mid-transaction is not correctly disambiguated from
-//    "another write byte begins": this core tells the two apart only by
-//    whether SCL actually drops again after an ack bit (next_byte()), but
-//    the controller's repeated-START sequence (i2c_controller_xtor_core.sv's
-//    REP_START_DROP) ALSO drops SCL once first (deliberately, so the Sr
-//    edge itself isn't mistaken for a STOP) -- so a target mid-write will
-//    race into expecting another data byte before the Sr edge arrives.
-//    Not exercised by this kit's required back-to-back tests (neither uses
-//    repeated-START), so left as a known gap rather than fixed under time
-//    pressure; needs a lookahead (e.g. arm a short window after SCL drops
-//    where a START edge still wins) before repeated-START is relied upon.
+// Repeated START (Sr): the controller drops SCL once before an Sr
+// (REP_START_DROP), so after an ack bit this core cannot yet tell an Sr
+// from the next data byte. It guesses a data byte (next_byte()). In a
+// write it releases SDA and starts receiving. The Sr's SCL rise clocks in
+// one bit, and then the Sr edge, through the global START override below,
+// throws that bit away and receives the new address. A read only reaches
+// an Sr after the controller NACKs, which leaves this core in WATCH.
+// i2c_proto_tb covers Sr after a write, after a read and after a NACKed
+// address, at default and 1-clock timing. Formal invariants 8 and 9 and an
+// Sr cover goal cover it too (tests/formal/PROPERTIES.md).
+//
+// Known limitation: no bus-level timeout/abort if a START is seen but the
+// address never completes (e.g. controller disappears mid-byte) -- the
+// core simply waits. Real hardware relies on a higher-level bus-timeout
+// (SMBus T_TIMEOUT, design.md §8 issue 5, explicitly out of scope for v1).
 // ----------------------------------------------------------------------------
 module i2c_target_xtor_core (
         input  wire        clock,

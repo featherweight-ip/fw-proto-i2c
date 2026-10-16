@@ -43,10 +43,9 @@
 // DRIVE_ACK_WAIT_FALL header note.) A repeated START still deliberately
 // drops SCL once first (REP_START_DROP) before the Sr edge -- that drop
 // is real (this core is actively beginning the next transaction), not a
-// filler pulse, so the same reasoning does not apply to it; see that
-// state's own comment and i2c_target_xtor_core.sv's matching note on the
-// one gap this still leaves (repeated-START, not exercised by this kit's
-// required tests).
+// filler pulse, so the same reasoning does not apply to it. The target
+// and monitor take that drop as the start of a data byte, and the Sr edge
+// then overrides it; see i2c_target_xtor_core.sv's repeated-START note.
 //
 // Timing: T_LOW/T_HIGH/T_HD_STA/T_SU_STA/T_SU_STO/T_BUF are module
 // PARAMETERS (clock-cycle counts), not the runtime cfg_* ports design.md §5

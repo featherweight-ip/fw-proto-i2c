@@ -7,9 +7,10 @@ Vendored under `fwvip-i2c/packages/` the same way `fw-proto-chi` and
 `fw-proto-wb` are vendored under their respective VIP repos.
 
 **Status:** controller, target and monitor roles implemented for Standard/
-Fast/Fast-plus timing with 7-bit addressing (10-bit, Hs-mode and UFm are
-deferred -- design.md §8). Both required back-to-back sims pass, as does
-the first at 1-clock timing (the fastest bus the cores follow). The
+Fast/Fast-plus timing with 7-bit addressing, including repeated START
+(10-bit, Hs-mode and UFm are deferred -- design.md §8). Both required
+back-to-back sims pass, as does the first at 1-clock timing (the fastest
+bus the cores follow). The
 back-to-back BMC passes at depth 80 with every cover goal reached; see
 [`tests/formal/PROPERTIES.md`](tests/formal/PROPERTIES.md). See
 [`../../docs/design.md`](../../docs/design.md) in the parent `fwvip-i2c`
