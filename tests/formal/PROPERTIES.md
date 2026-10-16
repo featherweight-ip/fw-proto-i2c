@@ -1,13 +1,18 @@
 # I2C kit — invariant properties → checkers
 
-The spec → invariant → checker map for `i2c_proto_fv.sv`, the back-to-back
-formal harness (design.md §8 issue 2). One controller core and one target
-core share a real open-drain SCL/SDA bus; a free environment drives the
-controller's op stream and the target's model decisions.
+The spec → invariant → checker map for the kit's two formal harnesses:
+
+- `i2c_proto_fv.sv`, the back-to-back harness (design.md §8 issue 2). One
+  controller core and one target core share a real open-drain SCL/SDA bus;
+  a free environment drives the controller's op stream and the target's
+  model decisions.
+- `i2c_ctl_sync_fv.sv`, the controller core alone against a free other
+  device on SCL and SDA: clock synchronization (see "Clock
+  synchronization" below).
 
 ```
-dfm run fv          # BMC, depth 80
-dfm run fv-cover    # cover goals, depth 80
+dfm run fv          # BMC: back-to-back at depth 80, sync at depth 40
+dfm run fv-cover    # cover goals of both
 ```
 
 ## Harness shape
@@ -44,14 +49,19 @@ environment breaking it, not because the cores mis-handled a legal caller.
 | # | Rule (UM10204) | Class | Checker | Status |
 | --- | --- | --- | --- | --- |
 | 1 | A STOP only closes an open transaction (never STOP without a prior START) | framing | `assert ($past(in_txn))` on every `stop_edge` | in BMC |
-| 2 | ACK sampled on the 9th clock, not before | framing | **none.** Relies on the single `bit_idx == 8` write site of `ack_result` (by inspection). A `$past`-based check was dropped; see "Harness pitfalls". | gap |
-| 3 | The controller's bit index stays in 0..8 | FSM legality | **none.** A `u_ctl.bit_idx <= 8` check was dropped; see "Harness pitfalls". | gap |
+| 2 | ACK sampled on the 9th clock, not before | framing | each address or data byte the controller sent (not lost to arbitration) ends after exactly 9 SCL rises, counted on the bus, and its reported `ack` is the inverse of SDA at the 9th rise | in BMC |
+| 3 | The controller's bit index stays in 0..8, and tracks the bus | FSM legality | `f_bit_idx <= 8` always; whenever the controller samples a bit (`BIT_WAIT_HI` with SCL high), `f_bit_idx + 1` equals the bus's SCL rises in this byte | in BMC |
 | 4 | Clock-low-wins: the bus never reads SCL high while either core holds it low | handshake | `assert (!$past(scl))` whenever either `*_scl_oe` was set | in BMC |
 | 5 | Arbitration is lost only to another controller | mutual exclusion | with one controller, no response ever has `arb_lost=1`: one would mean the target pulled SDA low over a bit the controller drove | in BMC; real arbitration is exercised by the `i2c_arb` sim |
 | 6 | Data integrity end to end, write: each `tx_byte()` arrives at the target intact | integrity | `tgt RX_BYTE data == last_tx_byte` | in BMC |
 | 7 | Data integrity end to end, read: each byte the target's model supplies reaches the controller's `rx_byte()` intact | integrity | `ctl RX_BYTE rd_data == last_sup_byte` | in BMC |
 | 8 | START, Sr and STOP edges are the controller's own | framing | a START edge only while a `start()` op is in progress, with the controller pulling SDA low and the target not; a STOP edge only while a `stop()` op is | in BMC |
 | 9 | Address integrity, START and Sr: each address phase the target raises carries the controller's last `start()` address and R/W | integrity | on each new `ADDRESSED` request: a `start()` is pending, and `{addr, read}` match it | in BMC |
+
+Invariants 2 and 3 read the controller's formal-only debug outputs
+(`f_state`, `f_bit_idx`; see "Harness pitfalls"). Invariant 2 takes its
+bit count and SDA sample from the bus alone, so it doesn't just restate
+the core's `bit_idx == 8` write site.
 
 ## Cover goals (non-vacuity)
 
@@ -64,7 +74,60 @@ environment breaking it, not because the cores mis-handled a legal caller.
 
 The BMC depth must be above 68, or invariant 7 can never fire (63 for
 invariant 6). The earlier depth of 40 "passed" for exactly that reason.
-BMC at depth 80 passes in about 12 minutes.
+BMC at depth 80 passes in about 24 minutes (12 before invariants 2 and 3
+were restored).
+
+## Clock synchronization
+
+UM10204 §3.1.7: SCL is a wired-AND, so its low phase lasts as long as the
+longest low period of the controllers driving it, and its high phase as
+long as the shortest high period. The first device to end its high phase
+pulls SCL low, and every other controller starts its low count from that
+fall. The controller core used to count `T_HIGH` without watching SCL.
+
+The back-to-back harness can't check this: nothing in it pulls SCL low
+during a high phase. `i2c_ctl_sync_fv.sv` puts the controller core alone
+on SCL/SDA with a free other device that can pull either line low on any
+clock, and takes a free op stream. `T_LOW = 2` and `T_HIGH = 3`, so a
+high phase cut short is distinguishable from a full one.
+
+| # | Rule | Checker | Status |
+| --- | --- | --- | --- |
+| S1 | The controller counts high time only while SCL reads high | a clock of a high count (`BIT_HOLD_HI`, or the START hold `START_EDGE`) that sees SCL low is its last: next is `BIT_LOW`, or `DONE`/`ARB_ABORT` at the end of an op | in BMC (depth 40) |
+| S2 | A high phase never outlasts `T_HIGH` | consecutive `BIT_HOLD_HI` clocks `< T_HIGH` | in BMC |
+| S3 | Every low phase the controller drives is a full `T_LOW`, including one started by another device's fall | consecutive `BIT_LOW` clocks `== T_LOW` on exit, with SCL driven low throughout | in BMC |
+| S4 | The bit index stays in 0..8 (invariant 3, with free bus inputs) | `f_bit_idx <= 8` | in BMC |
+
+Cover goals, all reached by step 9: a bit's high phase cut short by the
+other device; the START hold cut short; a full `T_LOW` after a cut-short
+high phase.
+
+Teeth: with the `!scl_i` exit taken back out of `BIT_HOLD_HI`, BMC fails
+S1. With the first low after a START counted as `T_HD_STA` again (next
+section), it fails S3. Unbounded `mode prove` (k-induction) fails its
+induction step until the run counters are tied to the core's `tick_cnt`,
+so this harness is BMC only for now.
+
+The sim side is `tests/arb/i2c_arb_sync_tb.sv`: the arbitration collision
+with the winner at `T_LOW=3, T_HIGH=16` and the loser at `T_LOW=7,
+T_HIGH=3`, addresses differing only in the LSB so the two controllers
+share seven bits. The bench checks that each contended low phase lasts the
+longer `T_LOW` (up to 2 clocks more) and each contended high phase at most
+the shorter `T_HIGH` plus 2. Before the fix, the winner kept counting high
+through the loser's low phase and the two lost bit alignment: the winner's
+address was not ACKed.
+
+## Fixed — the first low phase after a START, and the last before a STOP
+
+Writing `i2c_arb_sync_tb` showed that the controller held the low phase
+after a START, and the one before a STOP, for `T_HD_STA` clocks, not
+`T_LOW`. The START parameters were also swapped: `START_EDGE` (SDA low,
+SCL high, the hold time t_HD;STA) counted `T_SU_STA`, and the setup time
+before an Sr (t_SU;STA) wasn't counted at all. Now `START_HOLD_HI` counts
+`T_SU_STA` once SCL reads high, `START_EDGE` counts `T_HD_STA`, and both
+of those low phases are `T_LOW`. It didn't show at the default timing,
+where `T_HD_STA = 2` is shorter than `T_LOW = 4` and the target follows any
+low phase, or in formal, which runs every phase at 1 clock.
 
 ## Fixed — the controller could leave reset driving SDA low
 
@@ -164,7 +227,11 @@ anything, and invariant 6's arbitration-loss reset never fired. The
 dropped checks for invariants 2 and 3 (below) used the same kind of
 reference, which explains their "failures within a few steps". Every check
 now uses the cores' ports and the harness's own registers. To check
-internal state, bring it out of the core through a port.
+internal state, bring it out of the core through a port: the controller
+core has formal-only outputs `f_state` and `f_bit_idx`, declared under
+`` `ifdef FORMAL `` so the sim and lint builds don't see them. `state_e`
+has explicit encodings, and each harness decodes `f_state` with
+localparams that mirror them.
 
 The harness's own tracking registers (`sclq`, `sdaq`, `in_txn`, ...) reset
 *synchronously*, so during the reset step they hold free ("anyinit")
@@ -172,5 +239,5 @@ initial values. Any check or cover that looks at them with `$past` must be
 gated on `!$past(reset)`. An ungated `cover ($past(stop_edge))` was hit
 vacuously at step 2.
 
-The dropped checks (invariants 2 and 3) read `u_ctl.*`, so they need a
-port-level form before they can be retried.
+Invariants 2 and 3 were dropped for the same reason. They are back, on the
+debug outputs.

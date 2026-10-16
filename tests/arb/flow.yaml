@@ -40,3 +40,38 @@ fragment:
       name: i2c_arb
     tags:
     - std.Test: {name: i2c_arb}
+
+  # The same collision with the two controllers at different T_LOW/T_HIGH:
+  # clock synchronization (i2c_arb_sync_tb.sv).
+  - name: i2c-arb-sync-tb
+    uses: std.FileSet
+    with:
+      type: systemVerilogSource
+      include:
+      - i2c_arb_tb.sv
+      - i2c_arb_sync_tb.sv
+      incdirs:
+      - .
+
+  - name: i2c-arb-sync-img
+    uses: hdlsim.SimImage
+    needs: [files, i2c-arb-sync-tb, flags-img]
+    with:
+      sim: "${{ sim }}"
+      top: [i2c_arb_sync_tb]
+
+  - name: i2c-arb-sync-run
+    uses: hdlsim.SimRun
+    needs: [i2c-arb-sync-img, "flags-run-${{ build }}"]
+    with:
+      sim: "${{ sim }}"
+      mode: test
+
+  - name: i2c-arb-sync
+    uses: hdlsim.SimCheck
+    needs: [i2c-arb-sync-run]
+    rundir: inherit
+    with:
+      name: i2c_arb_sync
+    tags:
+    - std.Test: {name: i2c_arb_sync}

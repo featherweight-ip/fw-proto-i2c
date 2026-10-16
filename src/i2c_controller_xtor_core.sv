@@ -19,12 +19,16 @@
 // immediately (ARB_ABORT: release both lines) and reports arb_lost=1 (the
 // other response field is then undefined, per i2c_controller_if.svh).
 //
-// Clock stretching / multi-master sync (design.md §5 "CLK_STRETCH_WAIT"):
-// after this core releases SCL (scl_oe<=0) to begin a bit's high phase, it
-// does not assume SCL is actually high -- it waits in BIT_WAIT_HI for scl_i
-// to read 1 before counting the high-phase hold. A target holding SCL low
-// to stretch, or another (slower) master still finishing its own low
-// period, are the same wait from this core's point of view.
+// Clock stretching / multi-master sync (design.md §5 "CLK_STRETCH_WAIT",
+// UM10204 §3.1.7): after this core releases SCL (scl_oe<=0) to begin a
+// bit's high phase, it does not assume SCL is actually high -- it waits in
+// BIT_WAIT_HI for scl_i to read 1 before counting the high-phase hold. A
+// target holding SCL low to stretch, or another (slower) master still
+// finishing its own low period, are the same wait from this core's point
+// of view. The high phase ends at T_HIGH or as soon as SCL reads low,
+// whichever is first (BIT_HOLD_HI; START_EDGE likewise for the START hold),
+// so the bus clock is low for the longest T_LOW and high for the shortest
+// T_HIGH of the controllers driving it.
 //
 // Between-ops bus discipline: after a 9-bit exchange's ack bit, SCL is
 // simply left released (high) -- this core does NOT insert an artificial
@@ -51,6 +55,11 @@
 // PARAMETERS (clock-cycle counts), not the runtime cfg_* ports design.md §5
 // sketches -- a deliberate scope reduction for v1 (documented in the kit
 // implementation report); one core instance covers one fixed timing profile.
+// Each is the UM10204 period of the same name: T_LOW every SCL low phase
+// (including the first after a START and the last before a STOP), T_HIGH a
+// bit's high phase, T_SU_STA SCL high before a START/Sr edge, T_HD_STA SDA
+// low after it before SCL falls, T_SU_STO SCL high before the STOP edge,
+// T_BUF bus free after it.
 //
 // NOT IMPLEMENTED in v1 (design.md §8, explicitly deferred there):
 //   - 10-bit addressing (addr_10b is accepted on the link but ignored --
@@ -82,6 +91,16 @@ module i2c_controller_xtor_core #(
         output reg  [9:0]  rsp_dat,
         output reg         rsp_valid,
         input  wire        rsp_ready
+`ifdef FORMAL
+        // Formal-only debug view of the FSM, for checks on internal state.
+        // A formal harness cannot read u_ctl.* hierarchically (sv2v + yosys
+        // turn such references into undriven constants -- see
+        // tests/formal/PROPERTIES.md "Harness pitfalls"), so the state it
+        // needs comes out here. f_state is state_e's encoding.
+        ,
+        output wire [3:0]  f_state,
+        output wire [3:0]  f_bit_idx
+`endif
     );
 
     typedef `I2C_CTRL_REQ_S req_s;
@@ -90,13 +109,23 @@ module i2c_controller_xtor_core #(
     req_s req_u;
     always_comb req_u = req_s'(req_dat);
 
+    // Explicit encodings: the formal harnesses decode f_state with
+    // localparams that mirror these values.
     typedef enum logic [3:0] {
-        IDLE, WAIT_FREE,
-        REP_START_DROP, START_HOLD_HI, START_EDGE,
-        BIT_LOW, BIT_WAIT_HI, BIT_HOLD_HI,
-        STOP_EDGE_LOW, STOP_WAIT_HI, STOP_HOLD_HI, STOP_RELEASE,
-        ARB_ABORT,
-        DONE
+        IDLE           = 4'd0,
+        WAIT_FREE      = 4'd1,
+        REP_START_DROP = 4'd2,
+        START_HOLD_HI  = 4'd3,
+        START_EDGE     = 4'd4,
+        BIT_LOW        = 4'd5,
+        BIT_WAIT_HI    = 4'd6,
+        BIT_HOLD_HI    = 4'd7,
+        STOP_EDGE_LOW  = 4'd8,
+        STOP_WAIT_HI   = 4'd9,
+        STOP_HOLD_HI   = 4'd10,
+        STOP_RELEASE   = 4'd11,
+        ARB_ABORT      = 4'd12,
+        DONE           = 4'd13
     } state_e;
     state_e state;
 
@@ -129,6 +158,11 @@ module i2c_controller_xtor_core #(
     wire cur_bit_sda_oe = driving_now && (intended_bit == 1'b0);
 
     assign req_ready = (state == IDLE);
+
+`ifdef FORMAL
+    assign f_state   = state;
+    assign f_bit_idx = bit_idx;
+`endif
 
     always_comb begin
         scl_o  = 1'b0;
@@ -215,7 +249,7 @@ module i2c_controller_xtor_core #(
                                 payload_is_tx <= 1'b0;
                                 ack_in_r      <= 1'b0;
                                 state    <= STOP_EDGE_LOW;
-                                tick_cnt <= 8'(T_HD_STA - 1);
+                                tick_cnt <= 8'(T_LOW - 1);
                             end
                             default: state <= IDLE;
                         endcase
@@ -224,29 +258,41 @@ module i2c_controller_xtor_core #(
 
                 // ---- START / repeated-START preamble --------------------
                 WAIT_FREE: begin
-                    if (scl_i && sda_i) state <= START_HOLD_HI;
+                    if (scl_i && sda_i) begin
+                        state    <= START_HOLD_HI;
+                        tick_cnt <= 8'(T_SU_STA - 1);
+                    end
                 end
                 // A repeated start must look electrically different from a
                 // STOP-then-START: drop SCL first (SDA is free to float to
                 // 1 here with no protocol meaning, since SCL is low), THEN
                 // let SCL rise and pull SDA low for the real Sr edge below.
                 REP_START_DROP: begin
-                    if (tick_cnt == 0) state <= START_HOLD_HI;
-                    else tick_cnt <= tick_cnt - 1;
-                end
-                START_HOLD_HI: begin
-                    // Also serves as the "wait for SCL actually high" step
-                    // (honors a stretch/sync wait the same as any other
-                    // high phase).
-                    if (scl_i) begin
-                        state    <= START_EDGE;
+                    if (tick_cnt == 0) begin
+                        state    <= START_HOLD_HI;
                         tick_cnt <= 8'(T_SU_STA - 1);
+                    end else tick_cnt <= tick_cnt - 1;
+                end
+                // Setup (t_SU;STA): SCL and SDA high for T_SU_STA clocks
+                // before the START edge. The count starts once SCL reads
+                // high, so a stretch/sync wait holds it like any other
+                // high phase.
+                START_HOLD_HI: begin
+                    if (scl_i) begin
+                        if (tick_cnt == 0) begin
+                            state    <= START_EDGE;
+                            tick_cnt <= 8'(T_HD_STA - 1);
+                        end else tick_cnt <= tick_cnt - 1;
                     end
                 end
+                // Hold (t_HD;STA): SDA low, SCL high for T_HD_STA clocks,
+                // then the first bit's low phase (T_LOW). A competing
+                // controller with a shorter hold pulls SCL low first; that
+                // fall starts this core's low phase too (UM10204 §3.1.7).
                 START_EDGE: begin
-                    if (tick_cnt == 0) begin
+                    if (tick_cnt == 0 || !scl_i) begin
                         state    <= BIT_LOW;
-                        tick_cnt <= 8'(T_HD_STA - 1);
+                        tick_cnt <= 8'(T_LOW - 1);
                     end else tick_cnt <= tick_cnt - 1;
                 end
 
@@ -272,8 +318,13 @@ module i2c_controller_xtor_core #(
                         tick_cnt <= 8'(T_HIGH - 1);
                     end
                 end
+                // The high phase lasts T_HIGH clocks, or until another
+                // device pulls SCL low, whichever comes first: SCL is
+                // released here, so a low scl_i is someone else -- a
+                // controller with a shorter high phase -- and its fall
+                // starts this core's low phase (UM10204 §3.1.7).
                 BIT_HOLD_HI: begin
-                    if (tick_cnt == 0) begin
+                    if (tick_cnt == 0 || !scl_i) begin
                         if (arb_lost_r) begin
                             state <= ARB_ABORT;
                         end else if (bit_idx < 8) begin

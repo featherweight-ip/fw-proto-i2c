@@ -40,3 +40,30 @@ fragment:
     with:
       top: i2c_proto_fv
       depth: 80
+
+  # Clock synchronization (UM10204 §3.1.7): the controller core alone, with
+  # a free other device on SCL/SDA (i2c_ctl_sync_fv.sv).
+  - name: sv2v-sync
+    uptodate: false
+    shell: bash
+    run: |
+      set -e
+      OUT="$TASK_RUNDIR/i2c_ctl_sync_fv.v"
+      sv2v --exclude=Assert -DFORMAL -I"${{ rootdir }}/src" \
+        "${{ rootdir }}/src/i2c_controller_xtor_core.sv" \
+        "${{ rootdir }}/tests/formal/i2c_ctl_sync_fv.sv" > "$OUT"
+      dfm-out fileset --filetype verilogSource --basedir "$TASK_RUNDIR" i2c_ctl_sync_fv.v
+
+  - name: bmc-sync
+    uses: formal.sby.BMC
+    needs: [sv2v-sync]
+    with:
+      top: i2c_ctl_sync_fv
+      depth: 40
+
+  - name: cover-sync
+    uses: formal.sby.Cover
+    needs: [sv2v-sync]
+    with:
+      top: i2c_ctl_sync_fv
+      depth: 40

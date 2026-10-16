@@ -54,8 +54,12 @@ module i2c_proto_fv (
         .scl_o(ctl_scl_o), .scl_oe(ctl_scl_oe), .scl_i(scl),
         .sda_o(ctl_sda_o), .sda_oe(ctl_sda_oe), .sda_i(sda),
         .req_dat(f_req_dat), .req_valid(f_req_valid), .req_ready(ctl_req_ready),
-        .rsp_dat(ctl_rsp_dat), .rsp_valid(ctl_rsp_valid), .rsp_ready(f_rsp_ready)
+        .rsp_dat(ctl_rsp_dat), .rsp_valid(ctl_rsp_valid), .rsp_ready(f_rsp_ready),
+        .f_state(ctl_f_state), .f_bit_idx(ctl_f_bit_idx)
     );
+    // The controller's formal-only debug view (see its port list).
+    wire [3:0] ctl_f_state, ctl_f_bit_idx;
+    localparam bit [3:0] S_BIT_WAIT_HI = 4'd6; // state_e in the core
 
     // ---- free environment: target's model decisions ----------------
     wire [20:0] tgt_req_dat;
@@ -185,14 +189,45 @@ module i2c_proto_fv (
         end
     end
 
-    // ---- #2/#3 (not checked) -----------------------------------------
-    // A "bit index stays in 0..8" check and an "ACK sampled on the 9th
-    // clock" check were tried here and failed within a few steps. Both
-    // read u_ctl.* hierarchical references, which this flow turns into
-    // undriven constants (see #5 and PROPERTIES.md "Harness pitfalls").
-    // They need a port-level form before they can be retried. Until then
-    // "ACK on the 9th clock" rests on the single `bit_idx == 8` write site
-    // of ack_result in i2c_controller_xtor_core.sv, by inspection.
+    // ---- #2/#3 bit counting ------------------------------------------
+    // Count the SCL rises of the byte in flight: from the START (or Sr)
+    // edge for an address byte, from the op's acceptance for a data byte.
+    // A data op is accepted with SCL high and starts with a fall, so no
+    // rise is counted early.
+    wire      scl_rise = scl && !sclq;
+    reg [3:0] byte_rises;          // rises before this clock
+    wire [3:0] rises_now = byte_rises + {3'd0, scl_rise};
+    reg       sda_at_9th;
+    always @(posedge clock) begin
+        if (reset) byte_rises <= 4'd0;
+        else if (start_edge ||
+                 (f_req_valid && ctl_req_ready &&
+                  (f_req_dat[23:22] == 2'd1 || f_req_dat[23:22] == 2'd2) /* TX/RX_BYTE */))
+            byte_rises <= 4'd0;
+        else if (scl_rise && byte_rises != 4'd15)
+            byte_rises <= byte_rises + 4'd1;
+        if (!reset && scl_rise && rises_now == 4'd9) sda_at_9th <= sda;
+    end
+
+    always @(posedge clock) begin
+        if (f_past_valid && !$past(reset)) begin
+            // #3: the controller's bit index stays in 0..8, and each time
+            // it samples a bit (SCL first reads high) it is on the bit the
+            // bus is on: index n at the (n+1)th rise of the byte.
+            assert (ctl_f_bit_idx <= 4'd8);
+            if (ctl_f_state == S_BIT_WAIT_HI && scl)
+                assert (rises_now == ctl_f_bit_idx + 4'd1);
+
+            // #2: an address or data byte the controller sent ends after
+            // exactly 9 clocks, and the ack it reports is what SDA carried
+            // at the 9th rise: the ACK is sampled on the 9th clock.
+            if (ctl_rsp_rise && (ctl_op == 2'd0 || ctl_op == 2'd1) /* START/TX */ &&
+                !ctl_rsp_dat[8] /* arb_lost */) begin
+                assert (byte_rises == 4'd9);
+                assert (ctl_rsp_dat[9] /* ack */ == !sda_at_9th);
+            end
+        end
+    end
 
     // ---- #4 clock-low-wins synchronization --------------------------
     // Whenever EITHER core still holds its own line low (scl_oe), the bus

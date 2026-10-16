@@ -15,14 +15,27 @@
 // ever fires on the loser, by construction: the winner always drives what
 // it reads back).
 //
+// The addresses and each controller's T_LOW/T_HIGH are this module's
+// parameters, so a wrapper top can rerun the collision with the two
+// controllers clocking at different rates (i2c_arb_sync_tb.sv: clock
+// synchronization, UM10204 §3.1.7). While both controllers drive SCL, every
+// low phase the bus shows must last as long as the longer T_LOW and no
+// longer, and every high phase no longer than the shorter T_HIGH -- each
+// within the two clocks a core takes to see SCL change and react. The bench
+// checks all three.
+//
 // Run:  dfm run i2c-arb    (expect: [i2c_arb] PASS; any failure exits
 //                            nonzero)
 // ======================================================================
-module i2c_arb_tb;
+module i2c_arb_tb #(
+        parameter bit [6:0] WINNER_ADDR = 7'h10, // 001_0000 -- MSB 0
+        parameter bit [6:0] LOSER_ADDR  = 7'h60, // 110_0000 -- MSB 1
+        parameter int A_T_LOW  = 4,
+        parameter int A_T_HIGH = 4,
+        parameter int B_T_LOW  = 4,
+        parameter int B_T_HIGH = 4
+    );
     import fw_proto_i2c_pkg::*;
-
-    localparam bit [6:0] WINNER_ADDR = 7'h10; // 001_0000 -- MSB 0
-    localparam bit [6:0] LOSER_ADDR  = 7'h60; // 110_0000 -- MSB 1
 
     class driver;
         i2c_controller_if ctl;
@@ -90,12 +103,12 @@ module i2c_arb_tb;
     wire scl = (a_scl_oe || b_scl_oe || t_scl_oe) ? 1'b0 : 1'b1;
     wire sda = (a_sda_oe || b_sda_oe || t_sda_oe) ? 1'b0 : 1'b1;
 
-    i2c_controller_xtor ctl_a (
+    i2c_controller_xtor #(.T_LOW(A_T_LOW), .T_HIGH(A_T_HIGH)) ctl_a (
         .clock(clock), .reset(reset),
         .scl_o(a_scl_o), .scl_oe(a_scl_oe), .scl_i(scl),
         .sda_o(a_sda_o), .sda_oe(a_sda_oe), .sda_i(sda)
     );
-    i2c_controller_xtor ctl_b (
+    i2c_controller_xtor #(.T_LOW(B_T_LOW), .T_HIGH(B_T_HIGH)) ctl_b (
         .clock(clock), .reset(reset),
         .scl_o(b_scl_o), .scl_oe(b_scl_oe), .scl_i(scl),
         .sda_o(b_sda_o), .sda_oe(b_sda_oe), .sda_i(sda)
@@ -105,6 +118,57 @@ module i2c_arb_tb;
         .scl_o(t_scl_o), .scl_oe(t_scl_oe), .scl_i(scl),
         .sda_o(t_sda_o), .sda_oe(t_sda_oe), .sda_i(sda)
     );
+
+    // --------------------------------------------------------------
+    // Clock synchronization check. A low phase is contended when both
+    // controllers pulled SCL low during it; a high phase is contended when
+    // the low phases on both sides of it are. Phase lengths are in clocks.
+    // --------------------------------------------------------------
+    localparam int MAX_T_LOW  = (A_T_LOW  > B_T_LOW)  ? A_T_LOW  : B_T_LOW;
+    localparam int MIN_T_HIGH = (A_T_HIGH < B_T_HIGH) ? A_T_HIGH : B_T_HIGH;
+
+    int unsigned sync_errors;
+    int unsigned n_contended_hi;
+    int unsigned phase_len;
+    int unsigned hi_len;       // length of the last high phase
+    bit          scl_q = 1'b1;
+    bit          a_low, b_low; // each controller pulled SCL low this phase
+    bit          prev_low_contended;
+
+    always @(posedge clock) begin
+        if (reset) begin
+            scl_q = 1'b1; phase_len = 0;
+            a_low = 1'b0; b_low = 1'b0; prev_low_contended = 1'b0;
+        end else begin
+            if (scl != scl_q) begin
+                if (!scl_q) begin
+                    // A low phase just ended.
+                    if (a_low && b_low &&
+                        (phase_len < MAX_T_LOW || phase_len > MAX_T_LOW + 2)) begin
+                        $display("FAIL: contended SCL low lasted %0d clocks, not %0d..%0d",
+                                  phase_len, MAX_T_LOW, MAX_T_LOW + 2);
+                        sync_errors++;
+                    end
+                    if (a_low && b_low && prev_low_contended) begin
+                        n_contended_hi++;
+                        if (hi_len > MIN_T_HIGH + 2) begin
+                            $display("FAIL: contended SCL high lasted %0d clocks, > %0d",
+                                      hi_len, MIN_T_HIGH + 2);
+                            sync_errors++;
+                        end
+                    end
+                    prev_low_contended = a_low && b_low;
+                    a_low = 1'b0; b_low = 1'b0;
+                end else
+                    hi_len = phase_len;
+                phase_len = 0;
+            end
+            phase_len++;
+            if (a_scl_oe) a_low = 1'b1;
+            if (b_scl_oe) b_low = 1'b1;
+            scl_q = scl;
+        end
+    end
 
     initial begin
         automatic driver                     drv_a, drv_b;
@@ -136,7 +200,8 @@ module i2c_arb_tb;
 
         repeat (20) @(posedge clock);
 
-        errors = drv_a.errors + drv_b.errors;
+        errors = drv_a.errors + drv_b.errors + sync_errors;
+        $display("[sync] %0d contended SCL high phases checked", n_contended_hi);
 
         if (drv_a.got_arb_lost) begin
             $display("FAIL: winner (addr 0x%02h) unexpectedly lost arbitration", WINNER_ADDR);

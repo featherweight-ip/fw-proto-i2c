@@ -67,17 +67,17 @@ package:
 
   # Formal (tests/formal/flow.yaml): back-to-back controller<->target cores.
   - root: fv
-    desc: Back-to-back formal BMC of the controller and target cores
-    needs: [formal.bmc]
+    desc: Formal BMC -- back-to-back controller and target cores, and the controller's clock sync
+    needs: [formal.bmc, formal.bmc-sync]
   - root: fv-cover
     desc: Reachability of an addressed transfer and a STOP (non-vacuity of fv)
-    needs: [formal.cover]
+    needs: [formal.cover, formal.cover-sync]
 
   # Both required back-to-back sims (design.md §8 issue 1), plus the first
   # at the fastest timing the cores support.
   - override: tests
-    needs: [i2c-proto, i2c-proto-fast, i2c-arb]
+    needs: [i2c-proto, i2c-proto-fast, i2c-arb, i2c-arb-sync]
 
   # What CI runs on every commit: every case is a few microseconds.
   - override: smoke
-    needs: [i2c-proto, i2c-proto-fast, i2c-arb]
+    needs: [i2c-proto, i2c-proto-fast, i2c-arb, i2c-arb-sync]
