@@ -208,6 +208,13 @@ module i2c_controller_xtor_core #(
                                 tick_cnt <= 8'(T_LOW - 1);
                             end
                             `I2C_OP_STOP: begin
+                                // DONE/IDLE after the STOP present
+                                // cur_bit_sda_oe, and bit_idx is now 0:
+                                // left as is, the last write's byte_reg[7]
+                                // would pull SDA low after the STOP (a
+                                // spurious START, then a STOP).
+                                payload_is_tx <= 1'b0;
+                                ack_in_r      <= 1'b0;
                                 state    <= STOP_EDGE_LOW;
                                 tick_cnt <= 8'(T_HD_STA - 1);
                             end

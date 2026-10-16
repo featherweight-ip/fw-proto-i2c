@@ -68,6 +68,23 @@ holding SDA low: a spurious START on the bus, then a STOP when it let go.
 The cover trace showed exactly that at step 2. Sims start those registers
 at X and miss it. Fixed by resetting the three registers to "not driving".
 
+## Fixed — the controller could drive SDA low after a STOP
+
+Same mechanism, different trigger. Accepting a STOP op reset `bit_idx` to
+0 but left `payload_is_tx` and `byte_reg` from the last write, so in
+`DONE`/`IDLE` after the STOP `cur_bit_sda_oe` followed `byte_reg[7]`. If
+the last byte written had MSB 0, the controller pulled SDA low with SCL
+high: a spurious START, then a STOP when the next op released it. Found by
+the fwvip-i2c UVM bench's bus scoreboard, not by formal; the kit sims only
+ever ended a write with an MSB-1 byte. Fixed by clearing `payload_is_tx`
+and `ack_in_r` on STOP; `i2c_proto_tb` now ends a write with 0x3C, so its
+STOP count catches a regression.
+
+**Formal gap this exposes:** no invariant says "a START or STOP edge only
+happens while the controller is in a START or STOP state". Invariant 1
+accepts the spurious pair, since the STOP does close an (also spurious)
+transaction. Worth adding as invariant 7.
+
 ## Open finding — the target misses bit 0 after an ACK when SCL low is 1 clock
 
 BMC counterexample (depth 68): after the address ACK, the controller drives

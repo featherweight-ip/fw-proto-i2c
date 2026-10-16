@@ -102,7 +102,10 @@ module i2c_proto_tb;
             // model's clock-stretch latency repeatedly, and a different
             // byte count / data pattern).
             wr = new[2];
-            wr[0] = 8'h5A; wr[1] = 8'hC3;
+            // The last byte's MSB is 0 on purpose: the controller once
+            // drove byte_reg[7] onto SDA after a STOP, a spurious
+            // START/STOP the STOP count below catches.
+            wr[0] = 8'h5A; wr[1] = 8'h3C;
             write_bytes(TGT_ADDR, wr);
             #200ns;
             read_bytes(TGT_ADDR, 2, rd);
