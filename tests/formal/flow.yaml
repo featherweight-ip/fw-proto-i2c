@@ -29,8 +29,9 @@ fragment:
     needs: [sv2v]
     with:
       top: i2c_proto_fv
-      # Must exceed the first data byte's arrival at the target (step 68 at
-      # T_*=1, per fv-cover) or the integrity assert can never fire.
+      # Must exceed the first data byte's arrival in each direction (steps
+      # 63 and 68 at T_*=1, per fv-cover) or the integrity asserts can
+      # never fire.
       depth: 80
 
   - name: cover

@@ -28,8 +28,8 @@
 //    waits. Real hardware relies on a higher-level bus-timeout (SMBus
 //    T_TIMEOUT, design.md §8 issue 5, explicitly out of scope for v1).
 //  - Repeated-START mid-transaction is not correctly disambiguated from
-//    "another write byte begins": this core's WATCH state tells the two
-//    apart only by whether SCL actually drops again after an ack bit, but
+//    "another write byte begins": this core tells the two apart only by
+//    whether SCL actually drops again after an ack bit (next_byte()), but
 //    the controller's repeated-START sequence (i2c_controller_xtor_core.sv's
 //    REP_START_DROP) ALSO drops SCL once first (deliberately, so the Sr
 //    edge itself isn't mistaken for a STOP) -- so a target mid-write will
@@ -66,7 +66,7 @@ module i2c_target_xtor_core (
     always_comb rsp_u = rsp_s'(rsp_dat);
 
     typedef enum logic [3:0] {
-        WATCH,                 // idle (not selected) or between-bytes (selected)
+        WATCH,                 // idle: not selected
         RECV_ARM,
         RECV_WAIT_RISE, RECV_WAIT_FALL,
         UPREQ,
@@ -157,28 +157,10 @@ module i2c_target_xtor_core (
             state    <= WATCH;
         end else begin
             unique case (state)
-                WATCH: begin
-                    if (selected && !scl_i) begin
-                        // SCL is already low: the controller just dropped it
-                        // to begin the next bit (DRIVE_ACK_WAIT_FALL/
-                        // SAMPLE_ACK_WAIT_FALL observed the same transition
-                        // the cycle before landing here) -- a LEVEL check,
-                        // not an edge, since the edge itself was consumed in
-                        // the prior state. If this guess is wrong (the
-                        // controller actually meant STOP/Sr), the global
-                        // override above corrects it once the real edge
-                        // arrives.
-                        if (dir_read) begin
-                            req_kind <= `I2C_TGT_UPREQ_KIND_TX_NEED_DATA;
-                            state    <= UPREQ;
-                        end else begin
-                            recv_purpose <= PURPOSE_DATA;
-                            bit_idx      <= '0;
-                            shift_reg    <= '0;
-                            state        <= RECV_WAIT_RISE;
-                        end
-                    end
-                end
+                // Not selected: only a START (the global override) leaves.
+                // A selected target never waits here -- the ack bit's
+                // *_WAIT_FALL state starts the next byte itself.
+                WATCH: ;
 
                 // Wait for SCL to actually go low before expecting bit0's
                 // rise -- only needed right after a START/Sr edge, where SCL
@@ -248,7 +230,12 @@ module i2c_target_xtor_core (
 
                 // ---- drive the ACK/NACK bit (address phase or write-data)
                 DRIVE_ACK_WAIT_RISE: if (scl_i)  state <= DRIVE_ACK_WAIT_FALL;
-                DRIVE_ACK_WAIT_FALL: if (!scl_i) state <= WATCH;
+                DRIVE_ACK_WAIT_FALL: begin
+                    if (!scl_i) begin
+                        if (selected) next_byte();
+                        else          state <= WATCH;
+                    end
+                end
 
                 // ---- drive 8 payload bits (read direction) --------------
                 DRIVE_BIT_WAIT_RISE: if (scl_i)  state <= DRIVE_BIT_WAIT_FALL;
@@ -273,7 +260,8 @@ module i2c_target_xtor_core (
                 SAMPLE_ACK_WAIT_FALL: begin
                     if (!scl_i) begin
                         selected <= !ack_drive; // ack_drive=1 here means NACK
-                        state    <= WATCH;
+                        if (!ack_drive) next_byte();
+                        else            state <= WATCH;
                     end
                 end
 
@@ -281,5 +269,30 @@ module i2c_target_xtor_core (
             endcase
         end
     end
+
+    // The ack bit is over and SCL has just fallen: start the next byte of a
+    // selected transaction, in this same cycle. This acts on the fall the
+    // caller just saw, rather than sampling SCL low a second time, so a
+    // low phase of one clock is enough. (An earlier version went through
+    // WATCH and sampled the low level again there; with SCL low for one
+    // clock that second sample saw SCL high, and the target came in a bit
+    // late -- tests/formal/PROPERTIES.md.)
+    //
+    // The fall is a guess that a data bit follows: a STOP or Sr also drops
+    // SCL first. A write then starts receiving, and the global override
+    // above corrects it when the real edge arrives. A read stretches SCL
+    // for the next byte, which is right: the controller ACKed, so it wants
+    // one.
+    task automatic next_byte();
+        if (dir_read) begin
+            req_kind <= `I2C_TGT_UPREQ_KIND_TX_NEED_DATA;
+            state    <= UPREQ;
+        end else begin
+            recv_purpose <= PURPOSE_DATA;
+            bit_idx      <= '0;
+            shift_reg    <= '0;
+            state        <= RECV_WAIT_RISE;
+        end
+    endtask
 
 endmodule

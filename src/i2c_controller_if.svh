@@ -5,6 +5,15 @@
 // On arb_lost=1 from ANY task, the other output (ack/data) is undefined --
 // arbitration can be lost on any bit including the ACK bit itself, so the
 // caller must check arb_lost first and not act on the other outputs.
+//
+// Caller contract (UM10204): call tx_byte() only after a write start() and
+// rx_byte() only after a read start(). After a read start() is ACKed, the
+// target owns SDA for the next byte, so the next call must be rx_byte();
+// keep calling it until one passes ack=0. Only then may stop() or a
+// repeated start() follow. A read therefore moves at least one byte. A
+// stop() or Sr issued while the target still owns SDA never appears on the
+// bus, and what follows is corrupt. The cores cannot detect a broken
+// contract; the formal harness assumes it (tests/formal/PROPERTIES.md).
 interface class i2c_controller_if;
 
     // Drives START (repeated=0) or Sr (repeated=1, this role already owns

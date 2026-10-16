@@ -124,6 +124,28 @@ module i2c_proto_fv (
         if (f_req_valid && f_req_dat[23:22] == 2'd2 /* RX_BYTE */) assume (env_read);
     end
 
+    // And a correct caller finishes a read before it ends it (UM10204: a
+    // target ACKed for a read owns SDA for the next byte, so only a NACKed
+    // byte hands the bus back): after a read address is ACKed, or after an
+    // rx_byte() that ACKed, the next op is rx_byte() -- never stop() or a
+    // repeated start(). Without this, BMC (depth 77) found START(read),
+    // ACK, then an immediate Sr: the target drove its first data bit, the
+    // Sr edge never appeared, and invariant 7 paired the wrong byte.
+    reg [1:0] ctl_op;            // op the controller last accepted
+    reg       ctl_rsp_valid_q;
+    wire      ctl_rsp_rise = ctl_rsp_valid && !ctl_rsp_valid_q;
+    reg       env_owes_rx;
+    always @(posedge clock) begin
+        if (reset) env_owes_rx <= 1'b0;
+        else if (f_req_valid && ctl_req_ready && f_req_dat[23:22] == 2'd2 /* RX_BYTE */)
+            env_owes_rx <= f_req_dat[0]; // ack_in: 1 asks for another byte
+        else if (ctl_rsp_rise && ctl_op == 2'd0 /* START */)
+            env_owes_rx <= env_read && ctl_rsp_dat[9] /* ack */ && !ctl_rsp_dat[8] /* arb_lost */;
+        else if (ctl_rsp_rise && ctl_rsp_dat[8] /* arb_lost: bus released */)
+            env_owes_rx <= 1'b0;
+    end
+    always @(*) if (f_req_valid && env_owes_rx) assume (f_req_dat[23:22] == 2'd2 /* RX_BYTE */);
+
     // The target's model-decision response cannot arrive in the SAME
     // cycle the core raises its request (a real bridge calling a real
     // task always takes at least one delta/cycle to run) -- without this,
@@ -257,9 +279,41 @@ module i2c_proto_fv (
         end
     end
 
+    // ---- #7 data integrity, read direction ---------------------------
+    // The mirror of #6: capture the byte the target's model supplies (the
+    // response to a TX_NEED_DATA up-request); the controller's next RX_BYTE
+    // result (arbitration not lost) must carry it. #6 alone left the read
+    // path unproven, and the target once mis-timed reads the same way it
+    // mis-timed writes.
+    reg [7:0] last_sup_byte;
+    reg       last_sup_valid;
+    wire      rx_result   = ctl_rsp_rise && ctl_op == 2'd2 /* RX_BYTE */ &&
+                             !ctl_rsp_dat[8] /* arb_lost */;
+    always @(posedge clock) begin
+        if (reset) begin
+            ctl_op          <= 2'd0;
+            ctl_rsp_valid_q <= 1'b0;
+            last_sup_valid  <= 1'b0;
+        end else begin
+            ctl_rsp_valid_q <= ctl_rsp_valid;
+            if (f_req_valid && ctl_req_ready) ctl_op <= f_req_dat[23:22];
+            if (tgt_req_valid && f_tgt_rsp_valid && tgt_req_dat[20:19] == 2'd2 /* TX_NEED_DATA */) begin
+                last_sup_byte  <= f_tgt_rsp_dat[7:0]; // data field, see i2c_xtor_macros.svh
+                last_sup_valid <= 1'b1;
+            end
+            if (ctl_rsp_rise && ctl_op == 2'd2) begin
+                if (rx_result && last_sup_valid)
+                    assert (ctl_rsp_dat[7:0] == last_sup_byte);
+                last_sup_valid <= 1'b0;
+            end
+        end
+    end
+
     // ---- cover: the proof is not vacuous -----------------------------
     always @(posedge clock) begin
         cover (tgt_req_valid && f_tgt_req_ready && tgt_req_dat[20:19] == 2'd1);
+        // A target-supplied byte reaches the controller (#7 can fire).
+        cover (!reset && rx_result && last_sup_valid);
         // A real STOP closing a transaction, out of reset. The harness's own
         // registers (sclq/sdaq) reset synchronously, so during the reset
         // step they hold free initial values and can fake a stop_edge --

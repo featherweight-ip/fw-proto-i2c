@@ -101,12 +101,8 @@ module i2c_monitor_xtor_core (
                 state    <= M_WATCH;
             end else begin
             unique case (state)
-                M_WATCH: begin
-                    if (in_frame && !scl_i) begin
-                        bit_idx <= '0;
-                        state   <= M_BIT_WAIT_RISE;
-                    end
-                end
+                // Out of a frame: only a START (the override) leaves.
+                M_WATCH: ;
 
                 M_ARM: if (!scl_i) state <= M_BIT_WAIT_RISE;
 
@@ -126,8 +122,13 @@ module i2c_monitor_xtor_core (
                             push(mon_s'{kind: KIND_BYTE, repeated: 1'b0,
                                          addr_phase: addr_phase_r,
                                          data: shift_reg, ack: ~ack_bit});
+                            // This fall begins the next byte's first bit
+                            // (or a STOP/Sr, which the override catches):
+                            // capture from here, without waiting to see
+                            // SCL low again, so a 1-clock low is enough.
                             addr_phase_r <= 1'b0;
-                            state        <= M_WATCH;
+                            bit_idx      <= '0;
+                            state        <= M_BIT_WAIT_RISE;
                         end
                     end
                 end

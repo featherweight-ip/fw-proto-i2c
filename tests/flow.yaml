@@ -43,3 +43,38 @@ fragment:
       name: i2c_proto
     tags:
     - std.Test: {name: i2c_proto}
+
+  # The same case with every controller timing phase at 1 clock: the
+  # fastest bus the target core must follow (i2c_proto_fast_tb.sv).
+  - name: i2c-proto-fast-tb
+    uses: std.FileSet
+    with:
+      type: systemVerilogSource
+      include:
+      - i2c_proto_tb.sv
+      - i2c_proto_fast_tb.sv
+      incdirs:
+      - .
+
+  - name: i2c-proto-fast-img
+    uses: hdlsim.SimImage
+    needs: [files, i2c-proto-fast-tb, flags-img]
+    with:
+      sim: "${{ sim }}"
+      top: [i2c_proto_fast_tb]
+
+  - name: i2c-proto-fast-run
+    uses: hdlsim.SimRun
+    needs: [i2c-proto-fast-img, "flags-run-${{ build }}"]
+    with:
+      sim: "${{ sim }}"
+      mode: test
+
+  - name: i2c-proto-fast
+    uses: hdlsim.SimCheck
+    needs: [i2c-proto-fast-run]
+    rundir: inherit
+    with:
+      name: i2c_proto_fast
+    tags:
+    - std.Test: {name: i2c_proto_fast}

@@ -12,10 +12,21 @@
 // adds simulated latency before answering, forcing the target core to hold
 // SCL low), and both ACK and NACK paths.
 //
+// The controller's timing parameters are this module's, so a wrapper top
+// can rerun the same case at another bus speed (i2c_proto_fast_tb.sv: 1
+// clock per phase, the target core's minimum).
+//
 // Run:  dfm run i2c-proto    (expect: [i2c_proto] PASS; any failure exits
 //                              nonzero)
 // ======================================================================
-module i2c_proto_tb;
+module i2c_proto_tb #(
+        parameter int T_LOW     = 4,
+        parameter int T_HIGH    = 4,
+        parameter int T_HD_STA  = 2,
+        parameter int T_SU_STA  = 2,
+        parameter int T_SU_STO  = 2,
+        parameter int T_BUF     = 2
+    );
     import fw_proto_i2c_pkg::*;
 
     localparam bit [6:0] TGT_ADDR = 7'h50;
@@ -84,6 +95,20 @@ module i2c_proto_tb;
             bit [7:0] rd[];
             errors = 0; n_bytes = 0;
 
+            // Read before anything is written: checks the read path on its
+            // own, so a broken write cannot hide it. Unwritten bytes have
+            // MSB 0 (mem_model::init_byte), so a lost bit 7 shows: the
+            // controller would read the released line as 1.
+            read_bytes(TGT_ADDR, 4, rd);
+            foreach (rd[i]) begin
+                if (rd[i] !== mem_model::init_byte(8'(i))) begin
+                    $display("FAIL: unwritten[%0d] got 0x%02h exp 0x%02h",
+                              i, rd[i], mem_model::init_byte(8'(i)));
+                    errors++;
+                end
+            end
+            #200ns;
+
             // Plain write, then read back and check round-trip integrity.
             wr = new[4];
             wr[0] = 8'hA0; wr[1] = 8'hA1; wr[2] = 8'hA2; wr[3] = 8'hA3;
@@ -143,6 +168,11 @@ module i2c_proto_tb;
         bit [7:0] mem [bit [7:0]];
         bit [7:0] ptr;
 
+        // What an unwritten byte reads as: MSB 0 for every offset used here.
+        static function bit [7:0] init_byte(bit [7:0] off);
+            return off ^ 8'h5A;
+        endfunction
+
         virtual task addressed(input bit [9:0] addr, input bit addr_10b,
                                 input bit read, output bit ack);
             #23ns; // clock-stretch: model latency before the ACK decision
@@ -166,7 +196,7 @@ module i2c_proto_tb;
 
         virtual task tx_byte(output bit [7:0] data, input bit ack);
             #13ns; // clock-stretch
-            data = mem.exists(ptr) ? mem[ptr] : 8'h00;
+            data = mem.exists(ptr) ? mem[ptr] : init_byte(ptr);
             ptr  = ptr + 8'd1;
         endtask
     endclass
@@ -211,7 +241,10 @@ module i2c_proto_tb;
     wire scl = (ctl_scl_oe || tgt_scl_oe) ? 1'b0 : 1'b1;
     wire sda = (ctl_sda_oe || tgt_sda_oe) ? 1'b0 : 1'b1;
 
-    i2c_controller_xtor ctl_xtor (
+    i2c_controller_xtor #(
+        .T_LOW(T_LOW), .T_HIGH(T_HIGH), .T_HD_STA(T_HD_STA),
+        .T_SU_STA(T_SU_STA), .T_SU_STO(T_SU_STO), .T_BUF(T_BUF)
+    ) ctl_xtor (
         .clock(clock), .reset(reset),
         .scl_o(ctl_scl_o), .scl_oe(ctl_scl_oe), .scl_i(scl),
         .sda_o(ctl_sda_o), .sda_oe(ctl_sda_oe), .sda_i(sda)
@@ -255,23 +288,19 @@ module i2c_proto_tb;
         repeat (50) @(posedge clock);
 
         errors = drv.errors;
-        // 2 address bytes (NACKed) + 2 address bytes (ACKed writes/reads) +
-        // 4+2 write bytes + 4+2 read bytes = driver's n_bytes + 3 address
-        // bytes (2 ACKed starts counted once each is folded into n_bytes'
-        // own bookkeeping as data only) -- count what the monitor should
-        // have seen: one address byte per start() call (4 total: 2 writes,
-        // 1 read... actually 2 writes + 2 reads + 1 NACKed = 5) plus every
-        // data byte the driver issued.
-        if (obs.n_bytes_seen != (5 + drv.n_bytes)) begin
+        // The monitor sees one address byte per start() -- 3 reads, 2
+        // writes and the NACKed write = 6 -- plus every data byte the
+        // driver moved, and one STOP per transaction.
+        if (obs.n_bytes_seen != (6 + drv.n_bytes)) begin
             $display("FAIL: monitor saw %0d bytes, expected %0d",
-                      obs.n_bytes_seen, 5 + drv.n_bytes);
+                      obs.n_bytes_seen, 6 + drv.n_bytes);
             errors++;
         end else
             $display("[monitor] observed %0d bytes (%0d address + %0d data) OK",
-                      obs.n_bytes_seen, 5, drv.n_bytes);
+                      obs.n_bytes_seen, 6, drv.n_bytes);
 
-        if (obs.n_stops != 5) begin
-            $display("FAIL: monitor saw %0d STOPs, expected 5", obs.n_stops);
+        if (obs.n_stops != 6) begin
+            $display("FAIL: monitor saw %0d STOPs, expected 6", obs.n_stops);
             errors++;
         end
 

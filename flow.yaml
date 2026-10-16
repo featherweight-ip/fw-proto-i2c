@@ -73,10 +73,11 @@ package:
     desc: Reachability of an addressed transfer and a STOP (non-vacuity of fv)
     needs: [formal.cover]
 
-  # Both required back-to-back sims (design.md §8 issue 1).
+  # Both required back-to-back sims (design.md §8 issue 1), plus the first
+  # at the fastest timing the cores support.
   - override: tests
-    needs: [i2c-proto, i2c-arb]
+    needs: [i2c-proto, i2c-proto-fast, i2c-arb]
 
-  # What CI runs on every commit: both cases are a few microseconds.
+  # What CI runs on every commit: every case is a few microseconds.
   - override: smoke
-    needs: [i2c-proto, i2c-arb]
+    needs: [i2c-proto, i2c-proto-fast, i2c-arb]
