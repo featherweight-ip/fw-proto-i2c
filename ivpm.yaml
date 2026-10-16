@@ -1,0 +1,66 @@
+
+# yaml-language-server: $schema=https://fvutils.github.io/ivpm/ivpm.schema.json
+package:
+  name: fw-proto-i2c
+  default-dep-set: dev
+
+  dep-sets:
+  # The fw-hdl standard-platform layer, as a dep-set a consumer can opt into.
+  # Pairs with the `use-fw-hdl` dv-flow config in flow.yaml: this makes the
+  # package present, the config makes it visible to the build. A consumer that
+  # wants fw_proto_i2c_spl_pkg needs BOTH; one without the other is a no-op or
+  # a load error respectively.
+  - name: use
+    deps:
+    - name: fw-hdl
+      url: https://github.com/featherweight-hdl/fw-hdl.git
+      dep-set: default-dev
+
+  # Not `uses: use`: the kit builds without fw-hdl, and fw-hdl's own deps
+  # are not all published on GitHub, so pulling it in here breaks every
+  # fetch of this package (including fwvip-i2c's) on a public runner.
+  - name: default-dev
+    deps:
+    - name: dv-flow-mgr
+      url: https://github.com/dv-flow/dv-flow-mgr.git
+    - name: dv-flow-libhdlsim
+      url: https://github.com/dv-flow/dv-flow-libhdlsim.git
+    # project.dv, the archetype flow.yaml uses (tests/smoke/lint-rtl slots).
+    - name: dv-flow-libproject
+      url: https://github.com/dv-flow/dv-flow-libproject.git
+    - name: dv-flow-libhdllint
+      url: https://github.com/dv-flow/dv-flow-libhdllint.git
+    - name: dv-flow-libformal
+      url: https://github.com/dv-flow/dv-flow-libformal.git
+    - name: verilator
+      src: gh-rls
+      url: https://github.com/edapack/verilator-bin
+      cache: true
+    - name: yosys
+      src: gh-rls
+      url: https://github.com/edapack/yosys-bin
+      cache: true
+      dep-set: default
+    # Documentation build (Sphinx) -- used by the docs CI workflow. 'sphinx'
+    # itself is pulled in transitively via dv-flow-mgr; these are the extras
+    # the fw-proto-i2c docs need.
+    - name: myst-parser
+      src: pypi
+    - name: furo
+      src: pypi
+    - name: sphinx-copybutton
+      src: pypi
+    # SymbiYosys (sby, from the yosys package) is a Python program that
+    # imports 'click' at startup; it isn't bundled with the yosys binaries,
+    # so the formal proof (fw.proto.i2c.fv) needs it pulled into the env
+    # explicitly.
+    - name: click
+      src: pypi
+
+  # What a developer of THIS repo fetches (the default). The kit's own tests
+  # (flow.yaml: tests, smoke, lint-rtl, fv) are pure transactor-level SV and
+  # need nothing beyond the tools above -- in particular not the VIP, which
+  # fetches this package with `dep-set: use`.
+  - name: dev
+    uses: default-dev
+    deps: []

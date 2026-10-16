@@ -1,0 +1,42 @@
+# yaml-language-server: $schema=https://dv-flow.github.io/flow.dv.schema.json
+#
+# Unnamed fragment (see src/flow.yaml) -- tasks live under the package, e.g.
+# fw.proto.i2c.i2c-arb.
+#
+# REQUIRED back-to-back sim test #2 of 2 for this kit (design.md §8 issue 1):
+# two controllers + one target on one real wired-AND net, exercising
+# arbitration. Not a generic kit requirement -- specific to this protocol.
+# Same image -> run -> check case shape as tests/flow.yaml.
+fragment:
+  tasks:
+  - name: i2c-arb-tb
+    uses: std.FileSet
+    with:
+      type: systemVerilogSource
+      include:
+      - i2c_arb_tb.sv
+      incdirs:
+      - .
+
+  - name: i2c-arb-img
+    uses: hdlsim.SimImage
+    needs: [files, i2c-arb-tb, flags-img]
+    with:
+      sim: "${{ sim }}"
+      top: [i2c_arb_tb]
+
+  - name: i2c-arb-run
+    uses: hdlsim.SimRun
+    needs: [i2c-arb-img, "flags-run-${{ build }}"]
+    with:
+      sim: "${{ sim }}"
+      mode: test
+
+  - name: i2c-arb
+    uses: hdlsim.SimCheck
+    needs: [i2c-arb-run]
+    rundir: inherit
+    with:
+      name: i2c_arb
+    tags:
+    - std.Test: {name: i2c_arb}

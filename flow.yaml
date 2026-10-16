@@ -1,0 +1,82 @@
+# yaml-language-server: $schema=https://dv-flow.github.io/flow.dv.schema.json
+package:
+  name: fw.proto.i2c
+
+  # The methodology-neutral DV archetype (dv-flow-libproject): the same verbs
+  # as every project built this way -- `dfm run tests`, `smoke`, `lint-rtl`,
+  # `tests-info`, `--sim`, `--build` -- with this file filling its slots.
+  uses: project.dv
+
+  # IVPM-generated map: resolves imports by name under packages/. Named
+  # through $IVPM_PACKAGES rather than a path relative to this file, so the
+  # same line works whether this kit is fetched standalone or (as today) is
+  # vendored under fwvip-i2c/packages/.
+  package-map: "${{ env.IVPM_PACKAGES }}/dv-flow-package-map.yaml"
+
+  imports:
+  - project.dv
+  - hdlsim
+  - hdllint
+  - formal.sby
+
+  fragments:
+  - src/flow.yaml
+  - tests/flow.yaml
+  - tests/arb/flow.yaml
+  - tests/formal/flow.yaml
+
+  configs:
+  # fw-hdl standard-platform layer. Selected with `dfm ... -c use-fw-hdl`,
+  # which requires the package to have been fetched with the matching IVPM
+  # dep-set so that fw-hdl is in the package map. There is no SPL/adapter
+  # layer yet (design.md §4: the two role APIs are used directly); add
+  # src/spl.yaml as this config's fragment if one is written.
+  - name: use-fw-hdl
+    imports:
+    - fw-hdl
+
+  tasks:
+  # Synthesizable sources: the three link cores. The *_xtor_if/*_xtor
+  # wrappers carry the class-side bindings and are not synthesizable.
+  - override: src-rtl
+    needs: [xtor-core]
+
+  # The class (SPL) layer.
+  - override: src-spl
+    needs: [class]
+
+  - override: lint-rtl
+    needs: [lint]
+
+  # Verilator lint over every core, elaborated from a lint top (tests/lint).
+  # Our own code: held to ZERO findings -- no baseline. A waiver needs a
+  # reason written next to it in lint-waivers.yaml.
+  - name: lint-top
+    uses: std.FileSet
+    with:
+      type: systemVerilogSource
+      base: tests/lint
+      include: [i2c_lint_top.sv]
+
+  - name: lint
+    uses: hdllint.Rtl
+    needs: [src-rtl, lint-top]
+    with:
+      top: [i2c_lint_top]
+      waivers: lint-waivers.yaml
+
+  # Formal (tests/formal/flow.yaml): back-to-back controller<->target cores.
+  - root: fv
+    desc: Back-to-back formal BMC of the controller and target cores
+    needs: [formal.bmc]
+  - root: fv-cover
+    desc: Reachability of an addressed transfer and a STOP (non-vacuity of fv)
+    needs: [formal.cover]
+
+  # Both required back-to-back sims (design.md §8 issue 1).
+  - override: tests
+    needs: [i2c-proto, i2c-arb]
+
+  # What CI runs on every commit: both cases are a few microseconds.
+  - override: smoke
+    needs: [i2c-proto, i2c-arb]

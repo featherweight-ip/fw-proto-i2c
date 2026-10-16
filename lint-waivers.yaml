@@ -1,0 +1,18 @@
+# Lint waivers for fw-proto-i2c's own RTL. Held to zero findings; every
+# waiver must say why the finding is intended.
+waivers:
+- rule: UNUSEDSIGNAL
+  path: "src/i2c_controller_xtor_core.sv"
+  reason: >-
+    req_u.addr[9:7] and addr_10b: 10-bit addressing is carried on the link
+    but not implemented by the v1 core (design.md §8 issue 4).
+- rule: UNUSEDSIGNAL
+  path: "src/i2c_target_xtor_core.sv"
+  reason: >-
+    req_ready: the target holds req_valid for all of UPREQ and waits only on
+    rsp_valid, relying on the bridge consuming the request before it answers
+    (see the UPREQ note in the core). A deviation from the kit link
+    convention, tracked as a follow-up rather than hidden.
+- rule: PINCONNECTEMPTY
+  path: "tests/lint/i2c_lint_top.sv"
+  reason: The lint top leaves the cores' link ports open on purpose.

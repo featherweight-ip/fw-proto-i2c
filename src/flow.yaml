@@ -1,0 +1,60 @@
+# yaml-language-server: $schema=https://dv-flow.github.io/flow.dv.schema.json
+#
+# No fragment name: its tasks live directly under the package
+# (fw.proto.i2c.<task>), and an unnamed fragment can't collide with an
+# imported package's fragment names. Mirrors fw-proto-wb's src/flow.yaml.
+fragment:
+  tasks:
+  - export: files
+    uses: std.FileSet
+    with:
+      type: systemVerilogSource
+      include:
+      - fw_proto_i2c_pkg.sv
+      - i2c_controller_xtor_if.sv
+      - i2c_controller_xtor_core.sv
+      - i2c_controller_xtor.sv
+      - i2c_target_xtor_if.sv
+      - i2c_target_xtor_core.sv
+      - i2c_target_xtor.sv
+      - i2c_monitor_xtor_if.sv
+      - i2c_monitor_xtor_core.sv
+      - i2c_monitor_xtor.sv
+      incdirs:
+      - .
+
+  - export: class
+    uses: std.FileSet
+    needs: [xtor-sv]
+    with:
+      type: systemVerilogSource
+      include:
+      - fw_proto_i2c_pkg.sv
+      incdirs:
+      - .
+
+  - export: xtor-core
+    uses: std.FileSet
+    with:
+      type: systemVerilogSource
+      include:
+      - i2c_controller_xtor_core.sv
+      - i2c_target_xtor_core.sv
+      - i2c_monitor_xtor_core.sv
+      incdirs:
+      - .
+
+  - export: xtor-sv
+    uses: std.FileSet
+    needs: [xtor-core]
+    with:
+      type: systemVerilogSource
+      include:
+      - i2c_controller_xtor_if.sv
+      - i2c_target_xtor_if.sv
+      - i2c_monitor_xtor_if.sv
+      - i2c_controller_xtor.sv
+      - i2c_target_xtor.sv
+      - i2c_monitor_xtor.sv
+      incdirs:
+      - .

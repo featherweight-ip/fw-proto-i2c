@@ -1,0 +1,41 @@
+# yaml-language-server: $schema=https://dv-flow.github.io/flow.dv.schema.json
+#
+# Back-to-back formal proof of the controller and target cores (design.md
+# §8 issue 2). The package-root `fv`/`fv-cover` roots point here:
+#   dfm run fv          BMC of every assertion in i2c_proto_fv.sv
+#   dfm run fv-cover    reachability of the cover goals (non-vacuity)
+# See PROPERTIES.md for the spec -> invariant -> checker mapping.
+#
+# yosys's own SV frontend rejects the cores' struct casts and assignment
+# patterns, so the cores and harness go through sv2v first (as fw-proto-chi).
+fragment:
+  name: formal
+
+  tasks:
+  - name: sv2v
+    uptodate: false
+    shell: bash
+    run: |
+      set -e
+      OUT="$TASK_RUNDIR/i2c_proto_fv.v"
+      sv2v --exclude=Assert -DFORMAL -I"${{ rootdir }}/src" \
+        "${{ rootdir }}/src/i2c_controller_xtor_core.sv" \
+        "${{ rootdir }}/src/i2c_target_xtor_core.sv" \
+        "${{ rootdir }}/tests/formal/i2c_proto_fv.sv" > "$OUT"
+      dfm-out fileset --filetype verilogSource --basedir "$TASK_RUNDIR" i2c_proto_fv.v
+
+  - name: bmc
+    uses: formal.sby.BMC
+    needs: [sv2v]
+    with:
+      top: i2c_proto_fv
+      # Must exceed the first data byte's arrival at the target (step 68 at
+      # T_*=1, per fv-cover) or the integrity assert can never fire.
+      depth: 80
+
+  - name: cover
+    uses: formal.sby.Cover
+    needs: [sv2v]
+    with:
+      top: i2c_proto_fv
+      depth: 80

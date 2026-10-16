@@ -1,0 +1,102 @@
+# featherweight-ip/fw-proto-i2c -- Forgejo Actions.
+#
+# COPY THIS AS A PAIR. Its counterpart is .github/workflows/ci.yml. The two
+# differ only where the forges do: this side adds the internal-identifier
+# check and uses forgejo/upload-artifact. The GitHub side also passes
+# GITHUB_TOKEN (github.token here is a Forgejo token) and uses actions/cache
+# v5. If you are changing anything else, they are drifting.
+#
+# What runs is ci/run.sh -- the same script on both forges, and on a laptop.
+#
+# NOTHING HERE PUBLISHES. That is why there is no release-authority `gate` job
+# (see dvkit/forgejo-ops templates/). If a publish job is ever added, add the
+# gate with it, on both sides.
+#
+# FORGEJO RUNNER CONSTRAINTS -- measured on this instance, not assumed.
+#   * `ubuntu-latest` is catthehacker/ubuntu:act-22.04 with Python 3.10,
+#     which nothing in this stack is tested on -- hence `ubuntu-24.04`
+#     (act-24.04), which the runner also offers.
+#   * `python` unqualified does not exist; ci/run.sh uses python3.
+#   * No third-party actions: a bare `uses:` resolves against code.forgejo.org.
+#     actions/checkout, actions/cache and forgejo/upload-artifact resolve.
+#
+# Trial-run a change before landing it:
+#   docker run --rm -v "$PWD:/w" -w /w catthehacker/ubuntu:act-24.04 ci/run.sh
+
+name: CI
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  checks:
+    name: Tests (sim, formal)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check for internal identifiers in tracked files
+        # This repo is published to git.dvkit.org, so anything committed here is
+        # public. Internal host names, tailnet addresses and CGNAT-range IPs
+        # must not appear in tracked files -- if a build ever needs one, it
+        # belongs in a repository secret, which is masked in logs.
+        #
+        # The pathspec excludes the WHOLE .forgejo/workflows directory, not just
+        # this file: ci.yml and docs.yml both carry this pattern, so excluding
+        # only itself makes each match the OTHER's copy.
+        run: |
+          pattern='perch-char\.ts\.net|\.ts\.net|a9550|100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.[0-9]+\.[0-9]+'
+          if git grep -nIE "$pattern" -- . ':!.forgejo/workflows/' ; then
+            echo "::error::internal identifier found in a tracked file (see matches above)"
+            exit 1
+          fi
+          echo "OK: no internal identifiers in tracked files"
+
+      # The ivpm cache holds the prebuilt tools (Verilator, Yosys, from
+      # edapack). Restore and save are separate steps so the save key can name
+      # what the cache HOLDS after ci/run.sh, not what ivpm.yaml says -- see
+      # ci/ivpm-cache-key.sh. The prefix restores the newest saved cache;
+      # ivpm fetches only what it lacks, and ci/run.sh prunes what no run uses.
+      - name: Restore the ivpm package cache
+        id: ivpm-restore
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.cache/ivpm
+          key: ivpm-${{ runner.os }}-
+          restore-keys: |
+            ivpm-${{ runner.os }}-
+
+      - name: Tests
+        # ci/run.sh points IVPM_CACHE at ~/.cache/ivpm, the path cached above.
+        # No GITHUB_TOKEN here: on Forgejo github.token is a FORGEJO token,
+        # and ivpm would send it to api.github.com and get a 401.
+        run: ci/run.sh
+
+      - name: Compute the ivpm cache key
+        id: ivpm-key
+        if: always()
+        run: |
+          k=$(ci/ivpm-cache-key.sh)
+          echo "key=${k:+ivpm-${{ runner.os }}-$k}" >> "$GITHUB_OUTPUT"
+
+      - name: Save the ivpm package cache
+        # Only when the contents changed (and there are some): an unchanged
+        # cache is already saved under this key.
+        if: >-
+          always() && steps.ivpm-key.outputs.key != '' &&
+          steps.ivpm-key.outputs.key != steps.ivpm-restore.outputs.cache-matched-key
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.cache/ivpm
+          key: ${{ steps.ivpm-key.outputs.key }}
+
+      - name: Upload the logs
+        if: always()
+        uses: forgejo/upload-artifact@v4
+        with:
+          name: ci-reports
+          path: ci-reports/
+          if-no-files-found: warn

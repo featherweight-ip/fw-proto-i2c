@@ -150,7 +150,6 @@ activemq-data/
 
 # Environments
 .env
-.envrc
 .venv
 env/
 venv/
@@ -215,4 +214,17 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# dv-flow build output
+rundir/
+packages/
+
+.agents/
+.claude/
+.codex/
+.cursor/
+
+# CI (ci/run.sh)
+.ci-venv/
+ci-reports/
 

@@ -1,0 +1,45 @@
+# yaml-language-server: $schema=https://dv-flow.github.io/flow.dv.schema.json
+#
+# Unnamed fragment (see src/flow.yaml) -- tasks live under the package, e.g.
+# fw.proto.i2c.i2c-proto.
+#
+# REQUIRED back-to-back sim test #1 of 2 for this kit (design.md §8 issue 1):
+# the standard controller<->target back-to-back. The second (arbitration-
+# specific) one is tests/arb/flow.yaml.
+#
+# A case is image -> run (`mode: test`, so a failure does not abort the
+# suite) -> check (verdict from the exit code: the bench `$fatal`s on any
+# error). The check carries the std.Test tag `tests`/`smoke` select on.
+fragment:
+  tasks:
+  - name: i2c-proto-tb
+    uses: std.FileSet
+    with:
+      type: systemVerilogSource
+      include:
+      - i2c_proto_tb.sv
+      incdirs:
+      - .
+
+  - name: i2c-proto-img
+    uses: hdlsim.SimImage
+    needs: [files, i2c-proto-tb, flags-img]
+    with:
+      sim: "${{ sim }}"
+      top: [i2c_proto_tb]
+
+  - name: i2c-proto-run
+    uses: hdlsim.SimRun
+    needs: [i2c-proto-img, "flags-run-${{ build }}"]
+    with:
+      sim: "${{ sim }}"
+      mode: test
+
+  - name: i2c-proto
+    uses: hdlsim.SimCheck
+    needs: [i2c-proto-run]
+    rundir: inherit
+    with:
+      name: i2c_proto
+    tags:
+    - std.Test: {name: i2c_proto}
