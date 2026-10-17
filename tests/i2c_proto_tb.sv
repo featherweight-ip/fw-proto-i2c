@@ -239,6 +239,51 @@ module i2c_proto_tb #(
             run_repeated_start();
             #200ns;
             run_10bit();
+            #200ns;
+            run_raw_10bit();
+        endtask
+
+        // A 10-bit header sent one raw byte at a time, the way software
+        // drives a byte-level controller such as the OpenCores core: a 7-bit
+        // start() whose address byte is 11110 A9 A8 R/W, and tx_byte() for
+        // addr[7:0]. This breaks the i2c_controller_if contract on purpose
+        // (the address is of the reserved form 1111 0xx); the target must
+        // still see a 10-bit header, and the monitor must flag addr[7:0] as
+        // an address byte.
+        task automatic raw_hdr(input bit read, input bit repeated, output bit ok);
+            bit ack, arb_lost;
+            ctl.start({5'b11110, TGT_ADDR10[9:8]}, 1'b0, read, repeated, ack, arb_lost);
+            n_addr++;
+            n_starts++;
+            if (repeated) n_sr++;
+            ok = ack && !arb_lost;
+            if (ok && !read) begin
+                ctl.tx_byte(TGT_ADDR10[7:0], ack, arb_lost);
+                n_addr++;
+                ok = ack && !arb_lost;
+            end
+            if (!ok) begin
+                $display("FAIL: raw 10-bit %s header not ACKed", read ? "read" : "write");
+                errors++;
+            end
+        endtask
+
+        task automatic run_raw_10bit();
+            bit [7:0] wr[];
+            bit [7:0] rd[];
+            bit ok;
+
+            // S F4 A5 data P, then S F4 A5 Sr F5 data P.
+            wr = '{8'hC3, 8'h3C};
+            raw_hdr(1'b0, 1'b0, ok);
+            if (ok) tx_bytes(wr);
+            do_stop();
+            #200ns;
+            raw_hdr(1'b0, 1'b0, ok);
+            if (ok) raw_hdr(1'b1, 1'b1, ok);
+            if (ok) rx_bytes(2, rd);
+            do_stop();
+            if (ok) check_bytes("raw 10-bit write, read", rd, wr);
         endtask
 
         // 10-bit addressing (UM10204 §3.1.11). The target answers
@@ -411,18 +456,23 @@ module i2c_proto_tb #(
         int unsigned n_sr;
         int unsigned n_stops;
         int unsigned n_addr_bytes;
+        string       events[$]; // every event, in order, for the TLM compare
 
         virtual function void observe_start(input bit repeated);
             n_starts++;
             if (repeated) n_sr++;
+            events.push_back(repeated ? "Sr" : "S");
         endfunction
         virtual function void observe_stop();
             n_stops++;
+            events.push_back("P");
         endfunction
         virtual function void observe_byte(input bit addr_phase, input bit [7:0] data,
                                             input bit ack);
             n_bytes_seen++;
             if (addr_phase) n_addr_bytes++;
+            events.push_back($sformatf("%s%02h%s", addr_phase ? "A" : "D", data,
+                                       ack ? "+" : "-"));
         endfunction
         virtual function void observe_arb_lost();
         endfunction
@@ -490,6 +540,7 @@ module i2c_proto_tb #(
         automatic i2c_target_xtor_bridge     tbr;
         automatic i2c_monitor_xtor_bridge     mbr;
         automatic int errors = 0;
+        automatic realtime t_sig, t_tlm;
 
         reset = 1'b1;
         repeat (4) @(posedge clock);
@@ -506,7 +557,9 @@ module i2c_proto_tb #(
 
         tbr.start_bridge();
         mbr.start_bridge();
+        t_sig = $realtime;
         drv.run();
+        t_sig = $realtime - t_sig;
 
         // Drain: let the last observed event propagate to the monitor.
         repeat (50) @(posedge clock);
@@ -543,6 +596,43 @@ module i2c_proto_tb #(
         if (obs.n_stops != drv.n_stop) begin
             $display("FAIL: monitor saw %0d STOPs, expected %0d", obs.n_stops, drv.n_stop);
             errors++;
+        end
+
+        // The same stimulus over the transaction-level bus (i2c_tlm_bus),
+        // with a fresh target model: the driver's own checks must pass, and
+        // the monitor must see exactly the event stream the signal-level
+        // monitor saw.
+        begin
+            automatic driver      tdrv;
+            automatic mem_model   tmem = new();
+            automatic observer    tobs = new();
+            automatic i2c_tlm_bus bus  = new(tmem);
+            bus.add_monitor(tobs);
+            bus.set_prescale(16'(PRESCALE));
+            bus.set_timing(10ns, T_LOW, T_HIGH, T_HD_STA, T_SU_STA, T_SU_STO, T_BUF);
+            tdrv = new(bus);
+            t_tlm = $realtime;
+            tdrv.run();
+            t_tlm = $realtime - t_tlm;
+            $display("[tlm] timed bus: %0t simulated vs %0t at signal level", t_tlm, t_sig);
+            errors += tdrv.errors;
+            if (tobs.events.size() != obs.events.size()) begin
+                $display("FAIL: TLM bus produced %0d monitor events, signal level %0d",
+                          tobs.events.size(), obs.events.size());
+                errors++;
+            end
+            foreach (obs.events[i]) begin
+                if (i >= tobs.events.size()) break;
+                if (tobs.events[i] != obs.events[i]) begin
+                    $display("FAIL: monitor event %0d: TLM bus %s, signal level %s",
+                              i, tobs.events[i], obs.events[i]);
+                    errors++;
+                    break;
+                end
+            end
+            $display("[tlm] %0d monitor events, same as signal level: %s",
+                      tobs.events.size(),
+                      (tobs.events == obs.events) ? "yes" : "NO");
         end
 
         if (errors != 0) $fatal(1, "[i2c_proto] FAIL (%0d errors)", errors);

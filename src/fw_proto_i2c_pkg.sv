@@ -27,4 +27,8 @@ package fw_proto_i2c_pkg;
     `include "i2c_target_bridge.svh"
     `include "i2c_monitor_bridge.svh"
 
+    // Transaction-level bus: controller API straight to a target model,
+    // no transactors (the TLM views' I2C channel).
+    `include "i2c_tlm_bus.svh"
+
 endpackage

@@ -12,7 +12,11 @@ START (Hs-mode and UFm are deferred -- design.md §8). The controller
 synchronizes its clock with other controllers on the bus (UM10204 §3.1.7).
 Both required back-to-back sims pass, as do the first at 1-clock timing
 (the fastest bus the cores follow) and the arbitration test with the two
-controllers clocking at different rates. The back-to-back BMC passes at
+controllers clocking at different rates. `i2c_tlm_bus` connects the
+controller API straight to a target model and monitors with no
+transactors, decoding bytes as the target and monitor cores do; the
+back-to-back sims rerun their stimulus over it and require the same
+monitor event stream. The back-to-back BMC passes at
 depth 80, and a controller-only clock-sync BMC at depth 40, with every
 cover goal reached; see
 [`tests/formal/PROPERTIES.md`](tests/formal/PROPERTIES.md). See
@@ -24,6 +28,7 @@ checkout for the full design.
 ```
 src/            i2c_{controller,target,monitor}_if.svh / _bridge.svh /
                 _xtor_if.sv / _xtor_core.sv / _xtor.sv
+                i2c_tlm_bus.svh          (transaction-level bus, no transactors)
 tests/          i2c_proto_tb.sv          (required back-to-back sim test)
                 i2c_proto_fast_tb.sv     (the same at 1-clock timing)
 tests/arb/      i2c_arb_tb.sv            (required 2-controller arbitration test)
