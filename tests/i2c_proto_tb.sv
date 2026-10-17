@@ -17,7 +17,10 @@
 //
 // The controller's timing parameters are this module's, so a wrapper top
 // can rerun the same case at another bus speed (i2c_proto_fast_tb.sv: 1
-// clock per phase, the target core's minimum).
+// clock per phase, the target core's minimum). PRESCALE is applied at
+// runtime through the class API (set_prescale()) before the first op
+// (i2c_proto_prescale_tb.sv). Every SCL low phase the controller drives
+// is checked to last exactly T_LOW*(PRESCALE+1) clocks.
 //
 // Run:  dfm run i2c-proto    (expect: [i2c_proto] PASS; any failure exits
 //                              nonzero)
@@ -28,7 +31,8 @@ module i2c_proto_tb #(
         parameter int T_HD_STA  = 2,
         parameter int T_SU_STA  = 2,
         parameter int T_SU_STO  = 2,
-        parameter int T_BUF     = 2
+        parameter int T_BUF     = 2,
+        parameter int PRESCALE  = 0
     );
     import fw_proto_i2c_pkg::*;
 
@@ -458,6 +462,26 @@ module i2c_proto_tb #(
         .scl_i(scl), .sda_i(sda)
     );
 
+    // Prescaler check: each SCL low phase the controller drives (BIT_LOW,
+    // REP_START_DROP, STOP_EDGE_LOW -- all T_LOW ticks) lasts exactly
+    // T_LOW*(PRESCALE+1) clocks.
+    int unsigned low_run = 0;
+    int unsigned n_low_phases = 0;
+    int unsigned low_errors = 0;
+    always @(posedge clock) begin
+        if (reset) low_run <= 0;
+        else if (ctl_scl_oe) low_run <= low_run + 1;
+        else if (low_run != 0) begin
+            n_low_phases <= n_low_phases + 1;
+            if (low_run != T_LOW * (PRESCALE + 1)) begin
+                $display("FAIL: controller SCL low for %0d clocks, expected %0d",
+                          low_run, T_LOW * (PRESCALE + 1));
+                low_errors <= low_errors + 1;
+            end
+            low_run <= 0;
+        end
+    end
+
     initial begin
         automatic driver                     drv;
         automatic mem_model                  mem;
@@ -478,6 +502,7 @@ module i2c_proto_tb #(
         tbr = new(tgt_xtor.u_if, mem);
         mbr = new(mon_xtor.u_if, obs);
         drv = new(cbr);
+        cbr.set_prescale(16'(PRESCALE));
 
         tbr.start_bridge();
         mbr.start_bridge();
@@ -486,7 +511,13 @@ module i2c_proto_tb #(
         // Drain: let the last observed event propagate to the monitor.
         repeat (50) @(posedge clock);
 
-        errors = drv.errors;
+        errors = drv.errors + low_errors;
+        if (n_low_phases == 0) begin
+            $display("FAIL: no controller SCL low phases observed");
+            errors++;
+        end else
+            $display("[timing] %0d SCL low phases of %0d clocks (T_LOW=%0d, prescale=%0d) OK",
+                      n_low_phases, T_LOW * (PRESCALE + 1), T_LOW, PRESCALE);
         // The monitor sees every address byte (one per 7-bit start(), up
         // to three per 10-bit one) and data byte the driver moved, every
         // START and Sr, with the Sr flagged as repeated, and one STOP per
@@ -521,7 +552,7 @@ module i2c_proto_tb #(
 
     // Watchdog so a broken handshake fails fast instead of hanging.
     initial begin
-        #200us;
+        #(200us * (PRESCALE + 1));
         $fatal(1, "[i2c_proto] TIMEOUT");
     end
 endmodule

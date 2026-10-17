@@ -44,4 +44,8 @@ class i2c_controller_xtor_bridge implements i2c_controller_if;
         vif.stop();
     endtask
 
+    virtual function void set_prescale(bit [15:0] prescale);
+        vif.set_prescale(prescale);
+    endfunction
+
 endclass

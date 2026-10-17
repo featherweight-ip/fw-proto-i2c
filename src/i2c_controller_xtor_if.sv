@@ -8,10 +8,15 @@
 // (start/tx_byte/rx_byte/stop), each a request-then-response round trip --
 // mirrors wb_initiator_xtor_if's request()/response() split, collapsed to one
 // task per call since each op here is already a single class-layer call.
+//
+// `prescale` is not an op: it is a level the core reads continuously (see
+// i2c_controller_xtor_core.sv), held here and changed by set_prescale().
 // ----------------------------------------------------------------------------
 interface i2c_controller_xtor_if (
         input  wire clock,
         input  wire reset,
+
+        output reg  [15:0] prescale,
 
         output reg  [23:0] req_dat,
         output reg         req_valid,
@@ -24,6 +29,12 @@ interface i2c_controller_xtor_if (
 
     typedef `I2C_CTRL_REQ_S req_s;
     typedef `I2C_CTRL_RSP_S rsp_s;
+
+    initial prescale = 16'd0;
+
+    function automatic void set_prescale(input bit [15:0] p);
+        prescale = p;
+    endfunction
 
     task automatic do_op(input req_s r, output rsp_s p);
         req_dat <= r;

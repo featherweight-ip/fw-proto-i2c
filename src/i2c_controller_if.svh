@@ -46,6 +46,13 @@ interface class i2c_controller_if;
             output bit [7:0] data,
             output bit       arb_lost);
 
+    // Runtime bus-rate setting. The core counts its timing phases (T_LOW,
+    // T_HIGH, ... -- see i2c_controller_xtor_core.sv) in ticks of
+    // prescale+1 clocks, so this scales the whole bus timing; 0 (the
+    // default) is one tick per clock. The value holds until set again.
+    // Call it only between transactions (no op in progress).
+    pure virtual function void set_prescale(bit [15:0] prescale);
+
     // Terminates the transaction (STOP). No arb_lost output: a loss anywhere
     // aborts at the start()/tx_byte()/rx_byte() call where it happened, so
     // only the eventual bus winner ever reaches stop().

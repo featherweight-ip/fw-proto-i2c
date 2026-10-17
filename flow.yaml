@@ -81,8 +81,8 @@ package:
   # Both required back-to-back sims (design.md §8 issue 1), plus the first
   # at the fastest timing the cores support.
   - override: tests
-    needs: [i2c-proto, i2c-proto-fast, i2c-arb, i2c-arb-sync]
+    needs: [i2c-proto, i2c-proto-fast, i2c-proto-prescale, i2c-arb, i2c-arb-sync]
 
   # What CI runs on every commit: every case is a few microseconds.
   - override: smoke
-    needs: [i2c-proto, i2c-proto-fast, i2c-arb, i2c-arb-sync]
+    needs: [i2c-proto, i2c-proto-fast, i2c-proto-prescale, i2c-arb, i2c-arb-sync]

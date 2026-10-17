@@ -4,8 +4,10 @@
 // I2C Controller transactor (integration): interface (task API) + core (bus
 // FSM), wired by the internal ready/valid link. Public pins are the bare
 // open-drain SCL/SDA triples (kit convention) -- see i2c_xtor_macros.svh's
-// `I2C_ROLE_PORT. The timing parameters (clock cycles) pass straight through
-// to the core; see i2c_controller_xtor_core.sv.
+// `I2C_ROLE_PORT. The timing parameters pass straight through to the core,
+// which counts them in ticks of prescale+1 clocks; `prescale` comes from the
+// interface (set_prescale(), default 0 = one clock per tick). See
+// i2c_controller_xtor_core.sv.
 // ----------------------------------------------------------------------------
 module i2c_controller_xtor #(
         parameter int T_LOW     = 4,
@@ -20,6 +22,7 @@ module i2c_controller_xtor #(
         `I2C_ROLE_PORT()
     );
 
+    wire [15:0] prescale;
     wire [23:0] req_dat;
     wire        req_valid;
     wire        req_ready;
@@ -29,6 +32,7 @@ module i2c_controller_xtor #(
 
     i2c_controller_xtor_if u_if (
         .clock(clock), .reset(reset),
+        .prescale(prescale),
         .req_dat(req_dat), .req_valid(req_valid), .req_ready(req_ready),
         .rsp_dat(rsp_dat), .rsp_valid(rsp_valid), .rsp_ready(rsp_ready)
     );
@@ -37,7 +41,7 @@ module i2c_controller_xtor #(
         .T_LOW(T_LOW), .T_HIGH(T_HIGH), .T_HD_STA(T_HD_STA),
         .T_SU_STA(T_SU_STA), .T_SU_STO(T_SU_STO), .T_BUF(T_BUF)
     ) u_core (
-        .clock(clock), .reset(reset),
+        .clock(clock), .reset(reset), .prescale(prescale),
         .scl_o(scl_o), .scl_oe(scl_oe), .scl_i(scl_i),
         .sda_o(sda_o), .sda_oe(sda_oe), .sda_i(sda_i),
         .req_dat(req_dat), .req_valid(req_valid), .req_ready(req_ready),

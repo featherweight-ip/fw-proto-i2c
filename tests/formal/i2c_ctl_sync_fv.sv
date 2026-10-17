@@ -47,7 +47,7 @@ module i2c_ctl_sync_fv (
         .T_LOW(T_LOW), .T_HIGH(T_HIGH),
         .T_HD_STA(1), .T_SU_STA(1), .T_SU_STO(1), .T_BUF(1)
     ) u_ctl (
-        .clock(clock), .reset(reset),
+        .clock(clock), .reset(reset), .prescale(16'd0),
         .scl_o(ctl_scl_o), .scl_oe(ctl_scl_oe), .scl_i(scl),
         .sda_o(ctl_sda_o), .sda_oe(ctl_sda_oe), .sda_i(sda),
         .req_dat(f_req_dat), .req_valid(f_req_valid), .req_ready(ctl_req_ready),

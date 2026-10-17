@@ -14,7 +14,7 @@ module i2c_lint_top (
     wire sda = !((ctl_sda_oe && !ctl_sda_o) || (tgt_sda_oe && !tgt_sda_o));
 
     i2c_controller_xtor_core u_ctl (
-        .clock, .reset,
+        .clock, .reset, .prescale(16'd0),
         .scl_o(ctl_scl_o), .scl_oe(ctl_scl_oe), .scl_i(scl),
         .sda_o(ctl_sda_o), .sda_oe(ctl_sda_oe), .sda_i(sda),
         .req_dat(), .req_valid(), .req_ready(),

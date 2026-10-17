@@ -52,9 +52,15 @@
 // then overrides it; see i2c_target_xtor_core.sv's repeated-START note.
 //
 // Timing: T_LOW/T_HIGH/T_HD_STA/T_SU_STA/T_SU_STO/T_BUF are module
-// PARAMETERS (clock-cycle counts), not the runtime cfg_* ports design.md §5
-// sketches -- a deliberate scope reduction for v1 (documented in the kit
-// implementation report); one core instance covers one fixed timing profile.
+// PARAMETERS counted in TICKS. A tick is prescale+1 clocks, where `prescale`
+// is a runtime input (set through the class layer's set_prescale()), so one
+// instance covers a fixed timing SHAPE at a runtime-selected bus rate.
+// prescale=0 (the reset/default) makes a tick one clock, which is the
+// original clock-counted behaviour exactly. Every time a phase counter is
+// loaded the prescaler restarts, so a phase of N ticks lasts exactly
+// N*(prescale+1) clocks; only the counters are gated by the tick -- the
+// SCL/SDA checks (stretch wait, clock sync, arbitration, sampling) still
+// run on every clock. Change prescale only while the core is idle.
 // Each is the UM10204 period of the same name: T_LOW every SCL low phase
 // (including the first after a START and the last before a STOP), T_HIGH a
 // bit's high phase, T_SU_STA SCL high before a START/Sr edge, T_HD_STA SDA
@@ -82,6 +88,7 @@ module i2c_controller_xtor_core #(
     ) (
         input  wire        clock,
         input  wire        reset,
+        input  wire [15:0] prescale,   // tick = prescale+1 clocks (runtime)
 
         output reg         scl_o,
         output reg         scl_oe,
@@ -153,7 +160,9 @@ module i2c_controller_xtor_core #(
     reg       ack_result;     // sampled target ack (START/TX_BYTE)
     reg       arb_lost_r;
 
-    reg [7:0] tick_cnt;
+    reg [7:0] tick_cnt;       // phase length, in ticks
+    reg [15:0] pre_cnt;       // clocks left in the current tick
+    wire       tick = (pre_cnt == 16'd0);
 
     wire ack_is_tx = !payload_is_tx;
 
@@ -216,6 +225,7 @@ module i2c_controller_xtor_core #(
             bit_idx     <= '0;
             arb_lost_r  <= 1'b0;
             tick_cnt    <= '0;
+            pre_cnt     <= '0;
             // IDLE presents the last bit's SDA drive (cur_bit_sda_oe), so
             // these must reset to "not driving": left free, the core could
             // leave reset holding SDA low -- a spurious START, then a STOP
@@ -225,6 +235,8 @@ module i2c_controller_xtor_core #(
             ack_in_r      <= 1'b0;
             hdr_phase     <= HDR_NONE;
         end else begin
+            // Free-running tick within a phase; load_cnt() restarts it.
+            pre_cnt <= tick ? prescale : pre_cnt - 16'd1;
             unique case (state)
                 IDLE: begin
                     rsp_valid <= 1'b0;
@@ -246,7 +258,7 @@ module i2c_controller_xtor_core #(
                                 payload_is_tx <= 1'b1;
                                 if (req_u.repeated) begin
                                     state    <= REP_START_DROP;
-                                    tick_cnt <= 8'(T_LOW - 1);
+                                    load_cnt(8'(T_LOW - 1));
                                 end else
                                     state <= WAIT_FREE;
                             end
@@ -254,12 +266,12 @@ module i2c_controller_xtor_core #(
                                 byte_reg      <= req_u.wr_data;
                                 payload_is_tx <= 1'b1;
                                 state <= BIT_LOW;
-                                tick_cnt <= 8'(T_LOW - 1);
+                                load_cnt(8'(T_LOW - 1));
                             end
                             `I2C_OP_RX_BYTE: begin
                                 payload_is_tx <= 1'b0;
                                 state <= BIT_LOW;
-                                tick_cnt <= 8'(T_LOW - 1);
+                                load_cnt(8'(T_LOW - 1));
                             end
                             `I2C_OP_STOP: begin
                                 // DONE/IDLE after the STOP present
@@ -270,7 +282,7 @@ module i2c_controller_xtor_core #(
                                 payload_is_tx <= 1'b0;
                                 ack_in_r      <= 1'b0;
                                 state    <= STOP_EDGE_LOW;
-                                tick_cnt <= 8'(T_LOW - 1);
+                                load_cnt(8'(T_LOW - 1));
                             end
                             default: state <= IDLE;
                         endcase
@@ -281,7 +293,7 @@ module i2c_controller_xtor_core #(
                 WAIT_FREE: begin
                     if (scl_i && sda_i) begin
                         state    <= START_HOLD_HI;
-                        tick_cnt <= 8'(T_SU_STA - 1);
+                        load_cnt(8'(T_SU_STA - 1));
                     end
                 end
                 // A repeated start must look electrically different from a
@@ -289,10 +301,10 @@ module i2c_controller_xtor_core #(
                 // 1 here with no protocol meaning, since SCL is low), THEN
                 // let SCL rise and pull SDA low for the real Sr edge below.
                 REP_START_DROP: begin
-                    if (tick_cnt == 0) begin
+                    if (tick && tick_cnt == 0) begin
                         state    <= START_HOLD_HI;
-                        tick_cnt <= 8'(T_SU_STA - 1);
-                    end else tick_cnt <= tick_cnt - 1;
+                        load_cnt(8'(T_SU_STA - 1));
+                    end else if (tick) tick_cnt <= tick_cnt - 1;
                 end
                 // Setup (t_SU;STA): SCL and SDA high for T_SU_STA clocks
                 // before the START edge. The count starts once SCL reads
@@ -300,28 +312,29 @@ module i2c_controller_xtor_core #(
                 // high phase.
                 START_HOLD_HI: begin
                     if (scl_i) begin
-                        if (tick_cnt == 0) begin
+                        if (tick && tick_cnt == 0) begin
                             state    <= START_EDGE;
-                            tick_cnt <= 8'(T_HD_STA - 1);
-                        end else tick_cnt <= tick_cnt - 1;
-                    end
+                            load_cnt(8'(T_HD_STA - 1));
+                        end else if (tick) tick_cnt <= tick_cnt - 1;
+                    end else
+                        pre_cnt <= prescale;   // count from when SCL is high
                 end
                 // Hold (t_HD;STA): SDA low, SCL high for T_HD_STA clocks,
                 // then the first bit's low phase (T_LOW). A competing
                 // controller with a shorter hold pulls SCL low first; that
                 // fall starts this core's low phase too (UM10204 §3.1.7).
                 START_EDGE: begin
-                    if (tick_cnt == 0 || !scl_i) begin
+                    if ((tick && tick_cnt == 0) || !scl_i) begin
                         state    <= BIT_LOW;
-                        tick_cnt <= 8'(T_LOW - 1);
-                    end else tick_cnt <= tick_cnt - 1;
+                        load_cnt(8'(T_LOW - 1));
+                    end else if (tick) tick_cnt <= tick_cnt - 1;
                 end
 
                 // ---- generic 9-bit (8 payload + 1 ack) exchange ---------
                 BIT_LOW: begin
-                    if (tick_cnt == 0) begin
+                    if (tick && tick_cnt == 0) begin
                         state    <= BIT_WAIT_HI;
-                    end else tick_cnt <= tick_cnt - 1;
+                    end else if (tick) tick_cnt <= tick_cnt - 1;
                 end
                 BIT_WAIT_HI: begin
                     if (scl_i) begin
@@ -336,7 +349,7 @@ module i2c_controller_xtor_core #(
                             end
                         end
                         state    <= BIT_HOLD_HI;
-                        tick_cnt <= 8'(T_HIGH - 1);
+                        load_cnt(8'(T_HIGH - 1));
                     end
                 end
                 // The high phase lasts T_HIGH clocks, or until another
@@ -345,27 +358,27 @@ module i2c_controller_xtor_core #(
                 // controller with a shorter high phase -- and its fall
                 // starts this core's low phase (UM10204 §3.1.7).
                 BIT_HOLD_HI: begin
-                    if (tick_cnt == 0 || !scl_i) begin
+                    if ((tick && tick_cnt == 0) || !scl_i) begin
                         if (arb_lost_r) begin
                             state <= ARB_ABORT;
                         end else if (bit_idx < 8) begin
                             bit_idx  <= bit_idx + 4'd1;
                             state    <= BIT_LOW;
-                            tick_cnt <= 8'(T_LOW - 1);
+                            load_cnt(8'(T_LOW - 1));
                         end else if (hdr_phase == HDR_10_HI && ack_result) begin
                             // 10-bit header: addr[7:0] next
                             byte_reg  <= addr10_r[7:0];
                             bit_idx   <= '0;
                             hdr_phase <= HDR_10_LO;
                             state     <= BIT_LOW;
-                            tick_cnt  <= 8'(T_LOW - 1);
+                            load_cnt(8'(T_LOW - 1));
                         end else if (hdr_phase == HDR_10_LO && ack_result && read10_r) begin
                             // 10-bit read: Sr, then the read header
                             byte_reg  <= {5'b11110, addr10_r[9:8], 1'b1};
                             bit_idx   <= '0;
                             hdr_phase <= HDR_10_RD;
                             state     <= REP_START_DROP;
-                            tick_cnt  <= 8'(T_LOW - 1);
+                            load_cnt(8'(T_LOW - 1));
                         end else begin
                             // 9th (ack) bit done: report the result. SCL is
                             // simply left released (high) from here -- see
@@ -375,7 +388,7 @@ module i2c_controller_xtor_core #(
                             state     <= DONE;
                             rsp_valid <= 1'b1;
                         end
-                    end else tick_cnt <= tick_cnt - 1;
+                    end else if (tick) tick_cnt <= tick_cnt - 1;
                 end
 
                 ARB_ABORT: begin
@@ -386,27 +399,27 @@ module i2c_controller_xtor_core #(
 
                 // ---- STOP -----------------------------------------------
                 STOP_EDGE_LOW: begin
-                    if (tick_cnt == 0) state <= STOP_WAIT_HI;
-                    else tick_cnt <= tick_cnt - 1;
+                    if (tick && tick_cnt == 0) state <= STOP_WAIT_HI;
+                    else if (tick) tick_cnt <= tick_cnt - 1;
                 end
                 STOP_WAIT_HI: begin
                     if (scl_i) begin
                         state    <= STOP_HOLD_HI;
-                        tick_cnt <= 8'(T_SU_STO - 1);
+                        load_cnt(8'(T_SU_STO - 1));
                     end
                 end
                 STOP_HOLD_HI: begin
-                    if (tick_cnt == 0) begin
+                    if (tick && tick_cnt == 0) begin
                         state    <= STOP_RELEASE;
-                        tick_cnt <= 8'(T_BUF - 1);
-                    end else tick_cnt <= tick_cnt - 1;
+                        load_cnt(8'(T_BUF - 1));
+                    end else if (tick) tick_cnt <= tick_cnt - 1;
                 end
                 STOP_RELEASE: begin
-                    if (tick_cnt == 0) begin
+                    if (tick && tick_cnt == 0) begin
                         rsp_dat   <= rsp_s'{ack: 1'b0, arb_lost: 1'b0, rd_data: 8'h0};
                         rsp_valid <= 1'b1;
                         state     <= DONE;
-                    end else tick_cnt <= tick_cnt - 1;
+                    end else if (tick) tick_cnt <= tick_cnt - 1;
                 end
 
                 DONE: begin
@@ -420,6 +433,13 @@ module i2c_controller_xtor_core #(
             endcase
         end
     end
+
+    // Start a phase of n+1 ticks: load the phase counter and restart the
+    // prescaler, so the phase is exactly (n+1)*(prescale+1) clocks long.
+    task automatic load_cnt(input logic [7:0] n);
+        tick_cnt <= n;
+        pre_cnt  <= prescale;
+    endtask
 
     // Build the response for a completed START/TX_BYTE/RX_BYTE op
     // (BIT_HOLD_HI and ARB_ABORT both funnel here). Implemented as a task
