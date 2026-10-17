@@ -93,9 +93,8 @@ earlier, through a 7-bit `start()` to a reserved `1111 0xx` address.
 
 The 10-bit read header first arrives at step 94, past the BMC depth, so
 the default BMC covers 10-bit writes but not 10-bit reads. A one-off BMC
-toward depth 100 checked steps 0-94 with no failure (about 1h45m), which
-takes in the first 10-bit read header but not the read data after it;
-the sims
+at depth 100 passes (about 2h40m), which takes in the first 10-bit read
+header (step 94) but not the read data after it; the sims
 (`i2c_proto_tb`, and the fwvip-i2c `addr_10b` and `rand_traffic` cases)
 exercise them on every run.
 BMC at depth 80 passes in about 28 minutes (12 before invariants 2 and 3
