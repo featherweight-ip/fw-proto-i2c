@@ -5,14 +5,25 @@
 // low) -- the class API stays in the protocol's logical vocabulary.
 interface class i2c_target_if;
 
-    // Called once a START/Sr + address phase matches this target's
-    // configured address/mask. read selects the direction of the tx_byte/
-    // rx_byte calls that follow. addr_10b is always 0 in v1 (design.md §8
-    // issue 4 -- 10-bit addressing not yet implemented by the core).
+    // Called for every address phase after a START/Sr; ack=1 selects this
+    // target. read selects the direction of the tx_byte/rx_byte calls that
+    // follow. addr_10b=1: addr is a full 10-bit address (UM10204 §3.1.11),
+    // either from a write header whose first byte addressed_10b_hi() ACKed,
+    // or, for a read (Sr 11110 A9 A8 R), the address of the last 10-bit
+    // write header this target ACKed in the same transaction.
     pure virtual task addressed(
             input  bit [9:0] addr,
             input  bit       addr_10b,
             input  bit       read,
+            output bit       ack);
+
+    // Called for the first byte of a 10-bit write header (11110 A9 A8 W):
+    // ack=1 if this target answers to a 10-bit address whose upper two bits
+    // are addr_hi. On an ACK the second byte (addr[7:0]) follows, and with
+    // it an addressed() call carrying the full address. The core answers
+    // the first byte of a 10-bit read header itself (see addressed()).
+    pure virtual task addressed_10b_hi(
+            input  bit [1:0] addr_hi,
             output bit       ack);
 
     // One byte in the write direction (controller is sending): data is the

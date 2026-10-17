@@ -11,9 +11,9 @@
 // maps 1:1 onto one op each): START | TX_BYTE | RX_BYTE | STOP.
 //   addr/read/repeated are only meaningful for op==OP_START; wr_data only
 //   for op==OP_TX_BYTE; ack_in only for op==OP_RX_BYTE.
-// addr is carried as the full 10 bits for forward compatibility, but the
-// v1 core only implements 7-bit addressing (design.md §8 issue 4) -- see
-// i2c_controller_xtor_core.sv.
+// addr is the full 10 bits; addr_10b selects 10-bit addressing (UM10204
+// §3.1.11), where the core sends the two-byte header itself, and for a
+// read also the Sr and the read header -- see i2c_controller_xtor_core.sv.
 // ----------------------------------------------------------------------
 
 `define I2C_OP_START    2'd0
@@ -45,12 +45,19 @@
 // kind==RX_BYTE: data valid (byte received), rsp.ack is this byte's ACK/NACK.
 // kind==TX_NEED_DATA: nothing in the req is valid; rsp.data is the byte to
 //   drive next (see i2c_target_bridge.svh for the tx_byte() call pattern).
+// kind==ADDR10_HI: the first byte of a 10-bit write header; addr[9:8] holds
+//   its A9:A8, rsp.ack selects ACK/NACK of that byte.
+// addr_10b qualifies ADDRESSED: addr is a full 10-bit address. It is the
+// first (most significant) field so the older fields keep their bit
+// positions.
 `define I2C_TGT_UPREQ_KIND_ADDRESSED    2'd0
 `define I2C_TGT_UPREQ_KIND_RX_BYTE      2'd1
 `define I2C_TGT_UPREQ_KIND_TX_NEED_DATA 2'd2
+`define I2C_TGT_UPREQ_KIND_ADDR10_HI    2'd3
 
 `define I2C_TGT_UPREQ_S \
     struct packed { \
+        bit       addr_10b; \
         bit [1:0] kind; \
         bit [9:0] addr; \
         bit       read; \

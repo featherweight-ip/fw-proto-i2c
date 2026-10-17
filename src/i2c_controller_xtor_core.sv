@@ -61,9 +61,15 @@
 // low after it before SCL falls, T_SU_STO SCL high before the STOP edge,
 // T_BUF bus free after it.
 //
-// NOT IMPLEMENTED in v1 (design.md §8, explicitly deferred there):
-//   - 10-bit addressing (addr_10b is accepted on the link but ignored --
-//     only addr[6:0] is ever driven).
+// 10-bit addressing (UM10204 §3.1.11): a START op with addr_10b sends the
+// whole header itself, through the same byte engine (hdr_phase). A write
+// is 11110 A9 A8 W, then addr[7:0]. A read is the same write header, then
+// an Sr and 11110 A9 A8 R. Each header byte is sent only if the one before
+// it was ACKed, and the op reports the ACK of the last byte sent. So one
+// start() covers a 10-bit address in either direction, from a START or an
+// Sr; the caller does not issue the inner Sr.
+//
+// NOT IMPLEMENTED (design.md §8, explicitly deferred there):
 //   - Hs-mode / Ultra-fast mode.
 // ----------------------------------------------------------------------------
 module i2c_controller_xtor_core #(
@@ -131,6 +137,13 @@ module i2c_controller_xtor_core #(
 
     // Latched op fields
     reg       ack_in_r;
+    reg [9:0] addr10_r;       // a 10-bit START op's address ...
+    reg       read10_r;       // ... and direction
+
+    // Which header byte the byte engine is sending (10-bit START ops);
+    // HDR_NONE for a 7-bit address byte and for data bytes.
+    typedef enum logic [1:0] { HDR_NONE, HDR_10_HI, HDR_10_LO, HDR_10_RD } hdr_e;
+    hdr_e     hdr_phase;
 
     // Byte engine state
     reg [3:0] bit_idx;        // 0..8 (8 = ack bit)
@@ -210,6 +223,7 @@ module i2c_controller_xtor_core #(
             payload_is_tx <= 1'b0;
             byte_reg      <= 8'hff;
             ack_in_r      <= 1'b0;
+            hdr_phase     <= HDR_NONE;
         end else begin
             unique case (state)
                 IDLE: begin
@@ -219,9 +233,16 @@ module i2c_controller_xtor_core #(
                         bit_idx       <= '0;
                         arb_lost_r    <= 1'b0;
                         rx_reg        <= '0;
+                        hdr_phase     <= HDR_NONE;
                         unique case (req_u.op)
                             `I2C_OP_START: begin
-                                byte_reg      <= {req_u.addr[6:0], req_u.read};
+                                addr10_r <= req_u.addr;
+                                read10_r <= req_u.read;
+                                if (req_u.addr_10b) begin
+                                    byte_reg  <= {5'b11110, req_u.addr[9:8], 1'b0};
+                                    hdr_phase <= HDR_10_HI;
+                                end else
+                                    byte_reg  <= {req_u.addr[6:0], req_u.read};
                                 payload_is_tx <= 1'b1;
                                 if (req_u.repeated) begin
                                     state    <= REP_START_DROP;
@@ -331,6 +352,20 @@ module i2c_controller_xtor_core #(
                             bit_idx  <= bit_idx + 4'd1;
                             state    <= BIT_LOW;
                             tick_cnt <= 8'(T_LOW - 1);
+                        end else if (hdr_phase == HDR_10_HI && ack_result) begin
+                            // 10-bit header: addr[7:0] next
+                            byte_reg  <= addr10_r[7:0];
+                            bit_idx   <= '0;
+                            hdr_phase <= HDR_10_LO;
+                            state     <= BIT_LOW;
+                            tick_cnt  <= 8'(T_LOW - 1);
+                        end else if (hdr_phase == HDR_10_LO && ack_result && read10_r) begin
+                            // 10-bit read: Sr, then the read header
+                            byte_reg  <= {5'b11110, addr10_r[9:8], 1'b1};
+                            bit_idx   <= '0;
+                            hdr_phase <= HDR_10_RD;
+                            state     <= REP_START_DROP;
+                            tick_cnt  <= 8'(T_LOW - 1);
                         end else begin
                             // 9th (ack) bit done: report the result. SCL is
                             // simply left released (high) from here -- see

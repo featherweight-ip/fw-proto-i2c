@@ -23,17 +23,20 @@
 # Trial-run a change before landing it:
 #   docker run --rm -v "$PWD:/w" -w /w catthehacker/ubuntu:act-24.04 ci/run.sh
 
+# FOR NOW THIS SIDE RUNS ONLY ON DEMAND (workflow_dispatch): CI runs on
+# GitHub until this workflow has been brought up on the Forgejo runner.
+# The file stays so the runner does not fall back to .github/workflows/
+# (which it does when this directory is absent). To enable it, restore the
+# same `on:` block as the GitHub side.
+
 name: CI
 
 on:
-  push:
-    branches: ['**']
-  pull_request:
   workflow_dispatch:
 
 jobs:
   checks:
-    name: Tests (sim, formal)
+    name: Sims, lint and quick proofs (push); full proofs (nightly)
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -73,6 +76,10 @@ jobs:
         # ci/run.sh points IVPM_CACHE at ~/.cache/ivpm, the path cached above.
         # No GITHUB_TOKEN here: on Forgejo github.token is a FORGEJO token,
         # and ivpm would send it to api.github.com and get a 401.
+        env:
+          # Push: the sims, lint and the per-push proofs (minutes).
+          # Nightly: the same plus the full-depth BMC and the covers.
+          CI_CHECKS: ${{ github.event_name == 'schedule' && 'tests lint-rtl fv fv-cover' || 'smoke lint-rtl fv-quick' }}
         run: ci/run.sh
 
       - name: Compute the ivpm cache key

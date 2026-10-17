@@ -13,7 +13,7 @@ interface i2c_target_xtor_if (
         input  wire clock,
         input  wire reset,
 
-        input  wire [20:0] req_dat,
+        input  wire [21:0] req_dat,
         input  wire        req_valid,
         output reg         req_ready,
 
@@ -32,7 +32,7 @@ interface i2c_target_xtor_if (
     initial req_ready = 1'b0;
     initial rsp_valid = 1'b0;
 
-    task automatic wait_req(output bit [20:0] r);
+    task automatic wait_req(output bit [21:0] r);
         req_ready <= 1'b1;
         do @(posedge clock); while (!(req_valid && req_ready));
         r = req_dat;

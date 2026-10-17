@@ -17,8 +17,10 @@
 #* Exit status is nonzero iff any check failed (or bootstrap did).
 #*
 #* Environment:
-#*   CI_CHECKS    the dfm roots to run, space-separated (default:
-#*                "smoke lint-rtl fv")
+#*   CI_CHECKS    the dfm roots to run, space-separated. The default is
+#*                the push set, "smoke lint-rtl fv-quick" (a few minutes);
+#*                the workflows' nightly run passes "tests lint-rtl fv
+#*                fv-cover", whose formal runs take about 50 minutes
 #*   CI_DEP_SET   ivpm dep-set to fetch (default: dev)
 #*   CI_REPORTS   where the logs are collected (default: ci-reports)
 #*   IVPM_CACHE   ivpm's package cache (default: ~/.cache/ivpm, the path the
@@ -92,7 +94,7 @@ run_check() {
     fi
 }
 
-read -r -a checks <<< "${CI_CHECKS:-smoke lint-rtl fv}"
+read -r -a checks <<< "${CI_CHECKS:-smoke lint-rtl fv-quick}"
 for c in "${checks[@]}"; do run_check "$c"; done
 
 # ---- 3. collect -------------------------------------------------------------
@@ -107,6 +109,8 @@ copy_first "rundir/*.lint/lint-ctrf.json" "$reports/ctrf/"
 copy_first "rundir/*.lint/lint.sarif"     "$reports/lint-rtl/"
 copy_first "rundir/*.smoke/ctrf.json"     "$reports/smoke/"
 copy_first "rundir/*.smoke/junit.xml"     "$reports/smoke/"
+copy_first "rundir/*.tests/ctrf.json"     "$reports/tests/"
+copy_first "rundir/*.tests/junit.xml"     "$reports/tests/"
 
 verdict() { [ "${status[$1]}" = "0" ] && echo "pass" || echo "FAIL (status ${status[$1]})"; }
 

@@ -8,7 +8,7 @@ module i2c_target_xtor (
         `I2C_ROLE_PORT()
     );
 
-    wire [20:0] req_dat;
+    wire [21:0] req_dat;
     wire        req_valid;
     wire        req_ready;
     wire [8:0]  rsp_dat;

@@ -62,7 +62,7 @@ module i2c_proto_fv (
     localparam bit [3:0] S_BIT_WAIT_HI = 4'd6; // state_e in the core
 
     // ---- free environment: target's model decisions ----------------
-    wire [20:0] tgt_req_dat;
+    wire [21:0] tgt_req_dat;   // {addr_10b, kind, addr[9:0], read, data}
     wire        tgt_req_valid;
     (* anyseq *) wire        f_tgt_req_ready;
     (* anyseq *) wire [8:0]  f_tgt_rsp_dat;
@@ -150,6 +150,14 @@ module i2c_proto_fv (
     end
     always @(*) if (f_req_valid && env_owes_rx) assume (f_req_dat[23:22] == 2'd2 /* RX_BYTE */);
 
+    // A correct caller does not send a 7-bit address of the form 1111 0xx:
+    // UM10204 reserves it for the 10-bit prefix, and its address byte IS a
+    // 10-bit header on the bus. Without this, BMC (depth 31) found a 7-bit
+    // start() to 0x7A raise the target's ADDR10_HI request.
+    always @(*)
+        if (f_req_valid && f_req_dat[23:22] == 2'd0 /* START */ && !f_req_dat[11] /* addr_10b */)
+            assume (f_req_dat[18:14] != 5'b11110); // addr[6:2]
+
     // The target's model-decision response cannot arrive in the SAME
     // cycle the core raises its request (a real bridge calling a real
     // task always takes at least one delta/cycle to run) -- without this,
@@ -193,10 +201,12 @@ module i2c_proto_fv (
     // Count the SCL rises of the byte in flight: from the START (or Sr)
     // edge for an address byte, from the op's acceptance for a data byte.
     // A data op is accepted with SCL high and starts with a fall, so no
-    // rise is counted early.
+    // rise is counted early. The count wraps after 9: the second byte of a
+    // 10-bit header follows its first with no START edge between.
     wire      scl_rise = scl && !sclq;
     reg [3:0] byte_rises;          // rises before this clock
-    wire [3:0] rises_now = byte_rises + {3'd0, scl_rise};
+    wire [3:0] rises_next = (byte_rises == 4'd9) ? 4'd1 : byte_rises + 4'd1;
+    wire [3:0] rises_now  = scl_rise ? rises_next : byte_rises;
     reg       sda_at_9th;
     always @(posedge clock) begin
         if (reset) byte_rises <= 4'd0;
@@ -204,8 +214,8 @@ module i2c_proto_fv (
                  (f_req_valid && ctl_req_ready &&
                   (f_req_dat[23:22] == 2'd1 || f_req_dat[23:22] == 2'd2) /* TX/RX_BYTE */))
             byte_rises <= 4'd0;
-        else if (scl_rise && byte_rises != 4'd15)
-            byte_rises <= byte_rises + 4'd1;
+        else if (scl_rise)
+            byte_rises <= rises_next;
         if (!reset && scl_rise && rises_now == 4'd9) sda_at_9th <= sda;
     end
 
@@ -220,7 +230,8 @@ module i2c_proto_fv (
 
             // #2: an address or data byte the controller sent ends after
             // exactly 9 clocks, and the ack it reports is what SDA carried
-            // at the 9th rise: the ACK is sampled on the 9th clock.
+            // at the 9th rise: the ACK is sampled on the 9th clock. (For a
+            // 10-bit start(), the last header byte sent.)
             if (ctl_rsp_rise && (ctl_op == 2'd0 || ctl_op == 2'd1) /* START/TX */ &&
                 !ctl_rsp_dat[8] /* arb_lost */) begin
                 assert (byte_rises == 4'd9);
@@ -344,29 +355,58 @@ module i2c_proto_fv (
         end
     end
 
-    // ---- #9 address integrity, START and Sr ---------------------------
+    // ---- #9 address integrity, START and Sr, 7- and 10-bit -----------
     // Each address phase the target raises carries the address and R/W of
     // the controller's last start() -- whether a START or an Sr opened it --
     // and the target raises none the controller did not send. A request is
     // new on the rise of req_valid (the core leaves UPREQ before raising
     // the next).
-    reg [7:0] last_addr_byte;      // {addr[6:0], read}
-    reg       last_addr_valid;
-    wire      tgt_addressed = tgt_req_valid && !tgt_upreq_prev &&
-                              tgt_req_dat[20:19] == 2'd0 /* ADDRESSED */;
+    //
+    // A 10-bit start() raises up to three: ADDR10_HI with its A9:A8, then
+    // ADDRESSED with the full address and R/W=0 (the write header), and
+    // for a read, after the controller's own Sr, ADDRESSED again with R/W=1.
+    // The read one comes only after the write one.
+    reg [9:0] last_addr;
+    reg       last_read, last_10b, last_addr_valid, last_hdr_wr_seen;
+    wire      tgt_upreq_new = tgt_req_valid && !tgt_upreq_prev;
+    wire      tgt_addressed = tgt_upreq_new && tgt_req_dat[20:19] == 2'd0 /* ADDRESSED */;
+    wire      tgt_addr10_hi = tgt_upreq_new && tgt_req_dat[20:19] == 2'd3 /* ADDR10_HI */;
+    wire       tgt_10b  = tgt_req_dat[21];
+    wire [9:0] tgt_addr = tgt_req_dat[18:9];
+    wire       tgt_read = tgt_req_dat[8];
     always @(posedge clock) begin
         if (reset) last_addr_valid <= 1'b0;
         else begin
             if (f_req_valid && ctl_req_ready && f_req_dat[23:22] == 2'd0 /* START */) begin
-                // addr[6:0] and read fields, see i2c_xtor_macros.svh
-                last_addr_byte  <= {f_req_dat[18:12], f_req_dat[10]};
-                last_addr_valid <= 1'b1;
+                // addr, addr_10b and read fields, see i2c_xtor_macros.svh
+                last_addr        <= f_req_dat[21:12];
+                last_10b         <= f_req_dat[11];
+                last_read        <= f_req_dat[10];
+                last_addr_valid  <= 1'b1;
+                last_hdr_wr_seen <= 1'b0;
+            end
+            if (tgt_addr10_hi) begin
+                assert (last_addr_valid && last_10b);
+                if (last_addr_valid && last_10b)
+                    assert (tgt_addr[9:8] == last_addr[9:8]);
             end
             if (tgt_addressed) begin
                 assert (last_addr_valid);
-                if (last_addr_valid)
-                    assert ({tgt_req_dat[15:9], tgt_req_dat[8]} == last_addr_byte);
-                last_addr_valid <= 1'b0;
+                if (last_addr_valid && !last_10b) begin
+                    assert (!tgt_10b && {tgt_addr[6:0], tgt_read} == {last_addr[6:0], last_read});
+                    last_addr_valid <= 1'b0;
+                end
+                if (last_addr_valid && last_10b) begin
+                    assert (tgt_10b && tgt_addr == last_addr);
+                    if (!tgt_read) begin
+                        assert (!last_hdr_wr_seen);
+                        last_hdr_wr_seen <= 1'b1;
+                        if (!last_read) last_addr_valid <= 1'b0;
+                    end else begin
+                        assert (last_read && last_hdr_wr_seen);
+                        last_addr_valid <= 1'b0;
+                    end
+                end
             end
         end
     end
@@ -383,6 +423,10 @@ module i2c_proto_fv (
         // An address phase opened by an Sr reaches the target (#8 and #9
         // see a repeated START).
         cover (f_past_valid && !reset && sr_seen && tgt_addressed);
+        // A 10-bit write header, and a 10-bit read header, reach the
+        // target's model (#9 sees both 10-bit forms).
+        cover (f_past_valid && !reset && tgt_addressed && tgt_10b && !tgt_read);
+        cover (f_past_valid && !reset && tgt_addressed && tgt_10b && tgt_read);
         cover (tgt_req_valid && f_tgt_req_ready && tgt_req_dat[20:19] == 2'd1);
         // A target-supplied byte reaches the controller (#7 can fire).
         cover (!reset && rx_result && last_sup_valid);

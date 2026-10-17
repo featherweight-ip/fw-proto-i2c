@@ -2,7 +2,10 @@
 #
 # Back-to-back formal proof of the controller and target cores (design.md
 # §8 issue 2). The package-root `fv`/`fv-cover` roots point here:
-#   dfm run fv          BMC of every assertion in i2c_proto_fv.sv
+#   dfm run fv-quick    the per-push proofs: back-to-back BMC at depth 45
+#                       and the clock-sync BMC, about a minute in all
+#   dfm run fv          the nightly proofs: back-to-back BMC at depth 80
+#                       (about 30 minutes) and the clock-sync BMC
 #   dfm run fv-cover    reachability of the cover goals (non-vacuity)
 # See PROPERTIES.md for the spec -> invariant -> checker mapping.
 #
@@ -34,12 +37,26 @@ fragment:
       # never fire.
       depth: 80
 
+  # The same harness, shallow enough for every push. Depth 45 reaches a
+  # full addressed transaction ending in a STOP (cover step 42), so the
+  # framing, handshake and address-phase invariants are checked on it; the
+  # data-integrity invariants need depth 63+ and run only in `bmc`. BMC
+  # time roughly doubles every 5 steps from here (about 1 minute at 45).
+  - name: bmc-quick
+    uses: formal.sby.BMC
+    needs: [sv2v]
+    with:
+      top: i2c_proto_fv
+      depth: 45
+
   - name: cover
     uses: formal.sby.Cover
     needs: [sv2v]
     with:
       top: i2c_proto_fv
-      depth: 80
+      # Deeper than the BMC: a 10-bit read header (three header bytes and
+      # an Sr) arrives later than anything the BMC needs.
+      depth: 100
 
   # Clock synchronization (UM10204 §3.1.7): the controller core alone, with
   # a free other device on SCL/SDA (i2c_ctl_sync_fv.sv).

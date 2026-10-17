@@ -80,6 +80,10 @@ module i2c_arb_tb #(
             #11ns;
             ack = (addr[6:0] == WINNER_ADDR);
         endtask
+        virtual task addressed_10b_hi(input bit [1:0] addr_hi, output bit ack);
+            #7ns;
+            ack = 1'b0;
+        endtask
         virtual task rx_byte(input bit [7:0] data, output bit ack);
             #7ns;
             ack       = 1'b1;

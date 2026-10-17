@@ -15,6 +15,9 @@
 # (see dvkit/forgejo-ops templates/). If a publish job is ever added, add the
 # gate with it, on both sides.
 
+# FOR NOW THE FORGEJO SIDE RUNS ONLY ON DEMAND (workflow_dispatch), so CI
+# runs here; its `on:` block is the one other temporary difference.
+
 name: CI
 
 on:
@@ -22,13 +25,17 @@ on:
     branches: ['**']
   pull_request:
   workflow_dispatch:
+  # The nightly set: the full-depth formal runs, too slow for every push
+  # (see CI_CHECKS below and ci/run.sh).
+  schedule:
+    - cron: '41 2 * * *'
 
 permissions:
   contents: read
 
 jobs:
   checks:
-    name: Tests (sim, formal)
+    name: Sims, lint and quick proofs (push); full proofs (nightly)
     # 24.04, not ubuntu-latest: on the Forgejo runner ubuntu-latest is a 22.04
     # image with Python 3.10, which nothing in this stack is tested on. Named
     # the same on both sides so the two runs are the same environment.
@@ -53,6 +60,9 @@ jobs:
       - name: Tests
         # ci/run.sh points IVPM_CACHE at ~/.cache/ivpm, the path cached above.
         env:
+          # Push: the sims, lint and the per-push proofs (minutes).
+          # Nightly: the same plus the full-depth BMC and the covers.
+          CI_CHECKS: ${{ github.event_name == 'schedule' && 'tests lint-rtl fv fv-cover' || 'smoke lint-rtl fv-quick' }}
           # Lets ivpm resolve edapack's `latest` releases through the GitHub
           # API when its unauthenticated path cannot: anonymous API calls get
           # 60 an hour, shared by every job on the runner's address.

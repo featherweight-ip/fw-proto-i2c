@@ -12,14 +12,18 @@
 // keep calling it until one passes ack=0. Only then may stop() or a
 // repeated start() follow. A read therefore moves at least one byte. A
 // stop() or Sr issued while the target still owns SDA never appears on the
-// bus, and what follows is corrupt. The cores cannot detect a broken
+// bus, and what follows is corrupt. A 7-bit address must not be of the
+// form 1111 0xx: UM10204 reserves it for the 10-bit prefix, and its
+// address byte is a 10-bit header on the bus. The cores cannot detect a broken
 // contract; the formal harness assumes it (tests/formal/PROPERTIES.md).
 interface class i2c_controller_if;
 
     // Drives START (repeated=0) or Sr (repeated=1, this role already owns
-    // the bus) followed by the address+R/W byte. addr_10b is accepted but
-    // NOT YET IMPLEMENTED by the v1 core (design.md §8 issue 4) -- callers
-    // must pass addr_10b=0.
+    // the bus) followed by the address+R/W byte. With addr_10b=1, addr is a
+    // 10-bit address (UM10204 §3.1.11) and the core sends the whole header:
+    // 11110 A9 A8 W, addr[7:0], and for a read an Sr and 11110 A9 A8 R, each
+    // byte only if the one before was ACKed. `ack` is then the last header
+    // byte's ACK, so ack=1 means the target answered the full address.
     pure virtual task start(
             input  bit [9:0] addr,
             input  bit       addr_10b,

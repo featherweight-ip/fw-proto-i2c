@@ -11,8 +11,19 @@ The spec → invariant → checker map for the kit's two formal harnesses:
   synchronization" below).
 
 ```
-dfm run fv          # BMC: back-to-back at depth 80, sync at depth 40
-dfm run fv-cover    # cover goals of both
+dfm run fv-quick    # BMC, per push: back-to-back at depth 45, sync at depth 40 (~1 min)
+dfm run fv          # BMC, nightly: back-to-back at depth 80, sync at depth 40 (~30 min)
+dfm run fv-cover    # cover goals of both, nightly (back-to-back at depth 100)
+```
+
+Depth 45 reaches a full addressed transaction ending in a STOP (step 42),
+so `fv-quick` checks the framing, handshake and address-phase invariants
+(1-5, 8, 9 for 7-bit addresses). The data-integrity invariants (6, 7) need
+depth 63+, and 10-bit headers need 61+, so they are in `fv` only. Teeth:
+with the post-STOP SDA bug (below) put back, `fv-quick` fails invariant 8
+at step 42.
+
+```
 ```
 
 ## Harness shape
@@ -43,6 +54,7 @@ environment breaking it, not because the cores mis-handled a legal caller.
 | A3 | `tx_byte()` only in a write (R/W=0), `rx_byte()` only in a read | START(write)+RX_BYTE makes the target clock in 0xFF from the pull-ups, which the integrity check then mis-pairs. Found at depth 68. |
 | A4 | The target model never answers in the same cycle the core asks | A real bridge task takes at least one cycle. |
 | A5 | After an ACKed read `start()`, or an `rx_byte()` with `ack=1`, the next op is `rx_byte()` (no `stop()`/Sr until a byte is NACKed) | UM10204: the target owns SDA for the next read byte. START(read)+ACK+Sr let the target drive its first data bit, so the Sr edge never appeared and invariant 7 paired the wrong byte. Found at depth 77. Stated in `i2c_controller_if.svh`; the VIP driver rejects a 0-byte read. |
+| A6 | A 7-bit `start()` never uses an address of the form `1111 0xx` | UM10204 reserves it for the 10-bit prefix: its address byte is a 10-bit header on the bus. A 7-bit `start()` to 0x7A made the target raise `ADDR10_HI`. Found at depth 31 once the cores did 10-bit addressing. Stated in `i2c_controller_if.svh`; the VIP driver rejects such an address. |
 
 ## Invariants
 
@@ -56,7 +68,7 @@ environment breaking it, not because the cores mis-handled a legal caller.
 | 6 | Data integrity end to end, write: each `tx_byte()` arrives at the target intact | integrity | `tgt RX_BYTE data == last_tx_byte` | in BMC |
 | 7 | Data integrity end to end, read: each byte the target's model supplies reaches the controller's `rx_byte()` intact | integrity | `ctl RX_BYTE rd_data == last_sup_byte` | in BMC |
 | 8 | START, Sr and STOP edges are the controller's own | framing | a START edge only while a `start()` op is in progress, with the controller pulling SDA low and the target not; a STOP edge only while a `stop()` op is | in BMC |
-| 9 | Address integrity, START and Sr: each address phase the target raises carries the controller's last `start()` address and R/W | integrity | on each new `ADDRESSED` request: a `start()` is pending, and `{addr, read}` match it | in BMC |
+| 9 | Address integrity, START and Sr, 7- and 10-bit: each address phase the target raises carries the controller's last `start()` address and R/W | integrity | on each new `ADDRESSED` request: a `start()` is pending, and `{addr, read}` match it (all 10 bits and `addr_10b` for a 10-bit one). A 10-bit `start()` raises `ADDR10_HI` with its A9:A8, then `ADDRESSED` for the write header, then for a read `ADDRESSED` with R/W=1, only after the write header's | in BMC (10-bit read: see below) |
 
 Invariants 2 and 3 read the controller's formal-only debug outputs
 (`f_state`, `f_bit_idx`; see "Harness pitfalls"). Invariant 2 takes its
@@ -71,11 +83,37 @@ the core's `bit_idx == 8` write site.
 | A byte the target supplied reaches the controller (invariant 7 can fire) | step 68 |
 | A real STOP closes a transaction, out of reset | step 42 |
 | An address phase opened by an Sr reaches the target (invariants 8 and 9 see a repeated START) | step 66 |
+| A 10-bit write header reaches the target's model | step 61 |
+| A 10-bit read header reaches the target's model | step 94 |
 
 The BMC depth must be above 68, or invariant 7 can never fire (63 for
 invariant 6). The earlier depth of 40 "passed" for exactly that reason.
-BMC at depth 80 passes in about 24 minutes (12 before invariants 2 and 3
-were restored).
+Before assumption A6, the STOP and Sr goals were reached two steps
+earlier, through a 7-bit `start()` to a reserved `1111 0xx` address.
+
+The 10-bit read header first arrives at step 94, past the BMC depth, so
+the default BMC covers 10-bit writes but not 10-bit reads. A one-off BMC
+toward depth 100 checked steps 0-94 with no failure (about 1h45m), which
+takes in the first 10-bit read header but not the read data after it;
+the sims
+(`i2c_proto_tb`, and the fwvip-i2c `addr_10b` and `rand_traffic` cases)
+exercise them on every run.
+BMC at depth 80 passes in about 28 minutes (12 before invariants 2 and 3
+were restored, 24 before 10-bit addressing).
+
+## 10-bit addressing
+
+UM10204 §3.1.11. A 10-bit `start()` sends `11110 A9 A8 W`, `addr[7:0]`,
+and for a read an Sr and `11110 A9 A8 R`, each byte only if the last was
+ACKed. The target core raises `ADDR10_HI` for the first byte
+(`i2c_target_if.addressed_10b_hi()`), then `ADDRESSED` for the full
+address. It remembers an ACKed write header until a STOP or another
+address, and answers the read header from that memory. The free
+environment picks `addr_10b` freely, so every invariant above applies to
+10-bit traffic as well.
+
+Invariant 2 needed one change: its SCL rise count wraps after 9, since the
+second header byte follows the first with no START edge between.
 
 ## Clock synchronization
 

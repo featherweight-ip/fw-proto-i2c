@@ -23,21 +23,27 @@ class i2c_target_xtor_bridge;
     endtask
 
     task run();
-        bit [20:0] req_v;
+        bit [21:0] req_v;
         bit [8:0]  rsp_v;
         bit [1:0]  kind;
         bit [9:0]  addr;
+        bit        addr_10b;
         bit        read;
         bit [7:0]  req_data, data;
         bit        ack;
         forever begin
             vif.wait_req(req_v);
             // Field order must match i2c_xtor_macros.svh's
-            // `I2C_TGT_UPREQ_S: {kind[1:0], addr[9:0], read, data[7:0]}.
-            {kind, addr, read, req_data} = req_v;
+            // `I2C_TGT_UPREQ_S: {addr_10b, kind[1:0], addr[9:0], read,
+            // data[7:0]}.
+            {addr_10b, kind, addr, read, req_data} = req_v;
             unique case (kind)
                 `I2C_TGT_UPREQ_KIND_ADDRESSED: begin
-                    target_if.addressed(addr, 1'b0, read, ack);
+                    target_if.addressed(addr, addr_10b, read, ack);
+                    data = 8'h0;
+                end
+                `I2C_TGT_UPREQ_KIND_ADDR10_HI: begin
+                    target_if.addressed_10b_hi(addr[9:8], ack);
                     data = 8'h0;
                 end
                 `I2C_TGT_UPREQ_KIND_RX_BYTE: begin

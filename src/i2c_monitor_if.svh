@@ -10,8 +10,10 @@ interface class i2c_monitor_if;
     // A STOP condition.
     pure virtual function void observe_stop();
 
-    // One observed byte-with-ack: addr_phase=1 for the address+R/W byte,
-    // 0 for a data byte. ack is the sampled ACK (1)/NACK (0) for that byte.
+    // One observed byte-with-ack: addr_phase=1 for the address+R/W byte
+    // (and, after an ACKed 10-bit write header byte 11110 A9 A8 W, for the
+    // addr[7:0] byte that follows it), 0 for a data byte. ack is the
+    // sampled ACK (1)/NACK (0) for that byte.
     pure virtual function void observe_byte(
             input bit       addr_phase,
             input bit [7:0] data,

@@ -65,7 +65,12 @@ package:
       top: [i2c_lint_top]
       waivers: lint-waivers.yaml
 
-  # Formal (tests/formal/flow.yaml): back-to-back controller<->target cores.
+  # Formal (tests/formal/flow.yaml): back-to-back controller<->target cores,
+  # and the controller's clock sync. fv-quick is the per-push set; fv and
+  # fv-cover run nightly (ci/run.sh).
+  - root: fv-quick
+    desc: Formal BMC, per-push depth -- back-to-back at 45, and the controller's clock sync
+    needs: [formal.bmc-quick, formal.bmc-sync]
   - root: fv
     desc: Formal BMC -- back-to-back controller and target cores, and the controller's clock sync
     needs: [formal.bmc, formal.bmc-sync]

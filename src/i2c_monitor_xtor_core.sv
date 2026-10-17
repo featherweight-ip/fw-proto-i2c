@@ -45,6 +45,7 @@ module i2c_monitor_xtor_core (
 
     reg        in_frame;
     reg        addr_phase_r;
+    reg        addr_first_r;   // the first byte after a START/Sr
     reg [3:0]  bit_idx;
     reg [7:0]  shift_reg;
     reg        ack_bit;
@@ -91,6 +92,7 @@ module i2c_monitor_xtor_core (
                              addr_phase: 1'b0, data: 8'h0, ack: 1'b0});
                 in_frame     <= 1'b1;
                 addr_phase_r <= 1'b1;
+                addr_first_r <= 1'b1;
                 bit_idx      <= '0;
                 state        <= M_ARM;
             end else if (stop_edge) begin
@@ -126,7 +128,12 @@ module i2c_monitor_xtor_core (
                             // (or a STOP/Sr, which the override catches):
                             // capture from here, without waiting to see
                             // SCL low again, so a 1-clock low is enough.
-                            addr_phase_r <= 1'b0;
+                            // An ACKed 10-bit write header's first byte
+                            // (11110 A9 A8 W) is followed by addr[7:0],
+                            // also an address byte (UM10204 §3.1.11).
+                            addr_phase_r <= addr_first_r && !ack_bit &&
+                                            shift_reg[7:3] == 5'b11110 && !shift_reg[0];
+                            addr_first_r <= 1'b0;
                             bit_idx      <= '0;
                             state        <= M_BIT_WAIT_RISE;
                         end

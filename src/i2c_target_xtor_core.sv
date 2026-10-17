@@ -32,6 +32,15 @@
 // address, at default and 1-clock timing. Formal invariants 8 and 9 and an
 // Sr cover goal cover it too (tests/formal/PROPERTIES.md).
 //
+// 10-bit addressing (UM10204 §3.1.11): a first address byte 11110 A9 A8 W
+// raises ADDR10_HI (the model's addressed_10b_hi()); on an ACK the next
+// byte is received as addr[7:0] (PURPOSE_ADDR_LO) and raises ADDRESSED
+// with the full address and addr_10b=1. A fully ACKed write header is
+// remembered (addr10_valid) until a STOP or a different address. A read
+// header 11110 A9 A8 R then raises ADDRESSED with the remembered address
+// and read=1, if A9:A8 match; with nothing remembered, or no match, this
+// core NACKs it without asking the model.
+//
 // Known limitation: no bus-level timeout/abort if a START is seen but the
 // address never completes (e.g. controller disappears mid-byte) -- the
 // core simply waits. Real hardware relies on a higher-level bus-timeout
@@ -48,7 +57,7 @@ module i2c_target_xtor_core (
         output reg         sda_oe,
         input  wire        sda_i,
 
-        output wire [20:0] req_dat,
+        output wire [21:0] req_dat,
         output wire        req_valid,
         input  wire        req_ready,
 
@@ -74,7 +83,7 @@ module i2c_target_xtor_core (
     } state_e;
     state_e state;
 
-    typedef enum logic { PURPOSE_ADDR, PURPOSE_DATA } purpose_e;
+    typedef enum logic [1:0] { PURPOSE_ADDR, PURPOSE_ADDR_LO, PURPOSE_DATA } purpose_e;
     purpose_e recv_purpose;
 
     reg        selected;     // mid an ACKed (addressed) transaction
@@ -85,6 +94,10 @@ module i2c_target_xtor_core (
     reg        read_r;
     reg        ack_drive;    // this core's own ack decision (driven to SDA)
     reg [1:0]  req_kind;
+    reg        addr_10b_r;   // addr_r is a 10-bit address
+    reg        addr_lo_next; // a 10-bit header's first byte was ACKed
+    reg        addr10_valid; // a 10-bit write header was ACKed (see header)
+    reg [9:0]  addr10_r;     // ... with this address
 
     reg scl_i_q, sda_i_q;
     always @(posedge clock or posedge reset) begin
@@ -94,7 +107,8 @@ module i2c_target_xtor_core (
     wire start_edge = scl_i && scl_i_q && sda_i_q && !sda_i; // SDA falls, SCL high
     wire stop_edge  = scl_i && scl_i_q && !sda_i_q && sda_i; // SDA rises, SCL high
 
-    assign req_dat = req_s'{kind: req_kind, addr: addr_r, read: read_r, data: shift_reg};
+    assign req_dat = req_s'{addr_10b: addr_10b_r, kind: req_kind, addr: addr_r,
+                            read: read_r, data: shift_reg};
     assign req_valid = (state == UPREQ);
     assign rsp_ready = (state == UPREQ);
 
@@ -135,6 +149,8 @@ module i2c_target_xtor_core (
             state        <= WATCH;
             selected     <= 1'b0;
             bit_idx      <= '0;
+            addr_lo_next <= 1'b0;
+            addr10_valid <= 1'b0;
         end else if (start_edge) begin
             // Global override, checked ahead of the per-state case below:
             // a (repeated) START always wins, aborting whatever byte-engine
@@ -145,14 +161,17 @@ module i2c_target_xtor_core (
             // note). Mid-reception state (bit_idx/shift_reg) is simply
             // discarded; re-entering ADDR_PHASE reception is always safe.
             recv_purpose <= PURPOSE_ADDR;
+            addr_lo_next <= 1'b0;
             bit_idx      <= '0;
             shift_reg    <= '0;
             state        <= RECV_ARM;
         end else if (stop_edge) begin
             // Same override for STOP: whatever sub-state this core guessed
             // it was in, a real STOP always ends the transaction.
-            selected <= 1'b0;
-            state    <= WATCH;
+            selected     <= 1'b0;
+            addr_lo_next <= 1'b0;
+            addr10_valid <= 1'b0;
+            state        <= WATCH;
         end else begin
             unique case (state)
                 // Not selected: only a START (the global override) leaves.
@@ -178,14 +197,45 @@ module i2c_target_xtor_core (
                             bit_idx <= bit_idx + 4'd1;
                             state   <= RECV_WAIT_RISE;
                         end else begin
-                            if (recv_purpose == PURPOSE_ADDR) begin
-                                addr_r   <= {3'b0, shift_reg[7:1]};
-                                read_r   <= shift_reg[0];
-                                req_kind <= `I2C_TGT_UPREQ_KIND_ADDRESSED;
-                            end else begin
-                                req_kind <= `I2C_TGT_UPREQ_KIND_RX_BYTE;
-                            end
                             state <= UPREQ;
+                            unique case (recv_purpose)
+                                PURPOSE_ADDR: begin
+                                    read_r <= shift_reg[0];
+                                    if (shift_reg[7:3] != 5'b11110) begin
+                                        // 7-bit address
+                                        addr_r       <= {3'b0, shift_reg[7:1]};
+                                        addr_10b_r   <= 1'b0;
+                                        addr10_valid <= 1'b0;
+                                        req_kind     <= `I2C_TGT_UPREQ_KIND_ADDRESSED;
+                                    end else if (!shift_reg[0]) begin
+                                        // 10-bit write header, first byte
+                                        addr_r       <= {shift_reg[2:1], 8'h00};
+                                        addr_10b_r   <= 1'b1;
+                                        addr10_valid <= 1'b0;
+                                        req_kind     <= `I2C_TGT_UPREQ_KIND_ADDR10_HI;
+                                    end else if (addr10_valid &&
+                                                 addr10_r[9:8] == shift_reg[2:1]) begin
+                                        // 10-bit read header, this target
+                                        addr_r     <= addr10_r;
+                                        addr_10b_r <= 1'b1;
+                                        req_kind   <= `I2C_TGT_UPREQ_KIND_ADDRESSED;
+                                    end else begin
+                                        // 10-bit read header, not for us:
+                                        // NACK without asking (this state
+                                        // assignment overrides UPREQ above)
+                                        addr10_valid <= 1'b0;
+                                        ack_drive    <= 1'b0;
+                                        selected     <= 1'b0;
+                                        state        <= DRIVE_ACK_SETUP;
+                                    end
+                                end
+                                PURPOSE_ADDR_LO: begin
+                                    addr_r   <= {addr_r[9:8], shift_reg};
+                                    req_kind <= `I2C_TGT_UPREQ_KIND_ADDRESSED;
+                                end
+                                default:
+                                    req_kind <= `I2C_TGT_UPREQ_KIND_RX_BYTE;
+                            endcase
                         end
                     end
                 end
@@ -205,6 +255,16 @@ module i2c_target_xtor_core (
                                 selected  <= rsp_u.ack;
                                 dir_read  <= read_r;
                                 state     <= DRIVE_ACK_SETUP;
+                                if (addr_10b_r && !read_r) begin
+                                    addr10_valid <= rsp_u.ack;
+                                    addr10_r     <= addr_r;
+                                end
+                            end
+                            `I2C_TGT_UPREQ_KIND_ADDR10_HI: begin
+                                ack_drive    <= rsp_u.ack;
+                                selected     <= 1'b0;
+                                addr_lo_next <= rsp_u.ack;
+                                state        <= DRIVE_ACK_SETUP;
                             end
                             `I2C_TGT_UPREQ_KIND_RX_BYTE: begin
                                 ack_drive <= rsp_u.ack;
@@ -231,7 +291,15 @@ module i2c_target_xtor_core (
                 DRIVE_ACK_WAIT_FALL: begin
                     if (!scl_i) begin
                         if (selected) next_byte();
-                        else          state <= WATCH;
+                        else if (addr_lo_next) begin
+                            // ACKed the first byte of a 10-bit header:
+                            // addr[7:0] follows.
+                            addr_lo_next <= 1'b0;
+                            recv_purpose <= PURPOSE_ADDR_LO;
+                            bit_idx      <= '0;
+                            shift_reg    <= '0;
+                            state        <= RECV_WAIT_RISE;
+                        end else state <= WATCH;
                     end
                 end
 

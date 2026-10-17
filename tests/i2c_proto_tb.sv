@@ -11,8 +11,9 @@
 // returns a previously written value), clock stretching (the memory model
 // adds simulated latency before answering, forcing the target core to hold
 // SCL low), both ACK and NACK paths, and repeated START (Sr) after a write,
-// after a read and after a NACKed address. The monitor must see every
-// START, Sr, STOP and byte the driver put on the bus.
+// after a read and after a NACKed address, and 10-bit addressing (write,
+// read, read after an Sr, and a NACK at either header byte). The monitor
+// must see every START, Sr, STOP and byte the driver put on the bus.
 //
 // The controller's timing parameters are this module's, so a wrapper top
 // can rerun the same case at another bus speed (i2c_proto_fast_tb.sv: 1
@@ -31,7 +32,8 @@ module i2c_proto_tb #(
     );
     import fw_proto_i2c_pkg::*;
 
-    localparam bit [6:0] TGT_ADDR = 7'h50;
+    localparam bit [6:0] TGT_ADDR   = 7'h50;
+    localparam bit [9:0] TGT_ADDR10 = 10'h2A5; // the target's 10-bit address
 
     // --------------------------------------------------------------
     // Driver: holds the controller API handle; runs the stimulus and
@@ -41,7 +43,8 @@ module i2c_proto_tb #(
         i2c_controller_if ctl;
         int unsigned errors;
         int unsigned n_bytes;
-        int unsigned n_addr;   // address phases (START + Sr)
+        int unsigned n_addr;   // address bytes on the bus
+        int unsigned n_starts; // START + Sr conditions on the bus
         int unsigned n_sr;     // of which repeated STARTs
         int unsigned n_stop;
 
@@ -56,7 +59,32 @@ module i2c_proto_tb #(
                                 output bit arb_lost);
             ctl.start(addr, 1'b0, read, repeated, ack, arb_lost);
             n_addr++;
+            n_starts++;
             if (repeated) n_sr++;
+        endtask
+
+        // A 10-bit start(). nack_byte is the header byte the target must
+        // NACK (0 or 1), or -1 if it must ACK them all; ok says it did as
+        // expected. The bus carries the header bytes up to the first NACK,
+        // and for a read the controller's own Sr before the read header.
+        task automatic do_start10(input bit [9:0] addr, input bit read,
+                                  input bit repeated, input int nack_byte,
+                                  output bit ok);
+            bit ack, arb_lost;
+            int unsigned n_hdr;
+            ctl.start(addr, 1'b1, read, repeated, ack, arb_lost);
+            n_hdr = (nack_byte >= 0) ? nack_byte + 1 : (read ? 3 : 2);
+            n_addr   += n_hdr;
+            n_starts += (n_hdr == 3) ? 2 : 1;
+            n_sr     += ((n_hdr == 3) ? 1 : 0) + (repeated ? 1 : 0);
+            ok = !arb_lost && (ack == (nack_byte < 0));
+            if (!ok) begin
+                $display("FAIL: 10-bit %s %s addr 0x%03h: ack=%0d arb_lost=%0d, expected %s",
+                          repeated ? "Sr" : "START", read ? "read" : "write",
+                          addr, ack, arb_lost,
+                          (nack_byte < 0) ? "ACK" : $sformatf("NACK at header byte %0d", nack_byte));
+                errors++;
+            end
         endtask
 
         task automatic do_stop();
@@ -205,6 +233,68 @@ module i2c_proto_tb #(
             #200ns;
 
             run_repeated_start();
+            #200ns;
+            run_10bit();
+        endtask
+
+        // 10-bit addressing (UM10204 §3.1.11). The target answers
+        // TGT_ADDR10 as well as TGT_ADDR, with the same memory behind both.
+        task automatic run_10bit();
+            bit [7:0] wr[];
+            bit [7:0] rd[];
+            bit ok;
+
+            // Write, STOP, read: S 11110 10 W, A5, data / S 11110 10 W, A5,
+            // Sr, 11110 10 R, data.
+            wr = '{8'h6B, 8'h17, 8'hE4};
+            do_start10(TGT_ADDR10, 1'b0, 1'b0, -1, ok);
+            if (ok) tx_bytes(wr);
+            do_stop();
+            #200ns;
+            do_start10(TGT_ADDR10, 1'b1, 1'b0, -1, ok);
+            if (ok) rx_bytes(3, rd);
+            do_stop();
+            if (ok) check_bytes("10-bit write, read", rd, wr);
+            #200ns;
+
+            // 7-bit write -> Sr -> 10-bit read: the read's header starts
+            // from an Sr.
+            wr = '{8'h29, 8'h0F};
+            expect_ack(TGT_ADDR, 1'b0, 1'b0, ok);
+            tx_bytes(wr);
+            do_start10(TGT_ADDR10, 1'b1, 1'b1, -1, ok);
+            if (ok) rx_bytes(2, rd);
+            do_stop();
+            if (ok) check_bytes("7-bit write, Sr, 10-bit read", rd, wr);
+            #200ns;
+
+            // 10-bit write -> Sr -> 10-bit read, one transaction.
+            wr = '{8'h7E, 8'h01};
+            do_start10(TGT_ADDR10, 1'b0, 1'b0, -1, ok);
+            if (ok) tx_bytes(wr);
+            do_start10(TGT_ADDR10, 1'b1, 1'b1, -1, ok);
+            if (ok) rx_bytes(2, rd);
+            do_stop();
+            if (ok) check_bytes("10-bit write, Sr, 10-bit read", rd, wr);
+            #200ns;
+
+            // Wrong A9:A8: NACKed at the first header byte. Wrong
+            // addr[7:0]: NACKed at the second, for a write and a read.
+            do_start10(10'h1A5, 1'b0, 1'b0, 0, ok);
+            do_stop();
+            #200ns;
+            do_start10(10'h2A4, 1'b0, 1'b0, 1, ok);
+            do_stop();
+            #200ns;
+            do_start10(10'h2A4, 1'b1, 1'b0, 1, ok);
+            do_stop();
+            #200ns;
+
+            // After all that, 7-bit addressing still works.
+            expect_ack(TGT_ADDR, 1'b1, 1'b0, ok);
+            rx_bytes(1, rd);
+            do_stop();
+            check_bytes("7-bit read after 10-bit", rd, '{8'h7E});
         endtask
 
         // Repeated START (Sr): the controller keeps the bus between
@@ -276,7 +366,7 @@ module i2c_proto_tb #(
         virtual task addressed(input bit [9:0] addr, input bit addr_10b,
                                 input bit read, output bit ack);
             #23ns; // clock-stretch: model latency before the ACK decision
-            if (addr[6:0] == TGT_ADDR) begin
+            if (addr_10b ? addr == TGT_ADDR10 : addr[6:0] == TGT_ADDR) begin
                 ack = 1'b1;
                 // This test has no separate "register pointer" byte
                 // convention -- every addressed() call (read or write)
@@ -285,6 +375,11 @@ module i2c_proto_tb #(
                 ptr = 8'h00;
             end else
                 ack = 1'b0;
+        endtask
+
+        virtual task addressed_10b_hi(input bit [1:0] addr_hi, output bit ack);
+            #19ns; // clock-stretch
+            ack = (addr_hi == TGT_ADDR10[9:8]);
         endtask
 
         virtual task rx_byte(input bit [7:0] data, output bit ack);
@@ -392,9 +487,10 @@ module i2c_proto_tb #(
         repeat (50) @(posedge clock);
 
         errors = drv.errors;
-        // The monitor sees one address byte per start() (START or Sr),
-        // every data byte the driver moved, one STOP per stop(), and
-        // flags exactly the driver's Sr calls as repeated.
+        // The monitor sees every address byte (one per 7-bit start(), up
+        // to three per 10-bit one) and data byte the driver moved, every
+        // START and Sr, with the Sr flagged as repeated, and one STOP per
+        // stop().
         if (obs.n_bytes_seen != (drv.n_addr + drv.n_bytes)) begin
             $display("FAIL: monitor saw %0d bytes, expected %0d",
                       obs.n_bytes_seen, drv.n_addr + drv.n_bytes);
@@ -408,9 +504,9 @@ module i2c_proto_tb #(
                       obs.n_addr_bytes, drv.n_addr);
             errors++;
         end
-        if (obs.n_starts != drv.n_addr || obs.n_sr != drv.n_sr) begin
+        if (obs.n_starts != drv.n_starts || obs.n_sr != drv.n_sr) begin
             $display("FAIL: monitor saw %0d STARTs (%0d Sr), expected %0d (%0d Sr)",
-                      obs.n_starts, obs.n_sr, drv.n_addr, drv.n_sr);
+                      obs.n_starts, obs.n_sr, drv.n_starts, drv.n_sr);
             errors++;
         end
         if (obs.n_stops != drv.n_stop) begin
